@@ -56,6 +56,12 @@ include_directories(${rocksdb_SOURCE_DIR}/include)
 # 链接 RocksDB
 target_link_libraries(${PROJECT_NAME} PRIVATE rocksdb)
 
+find_package(OpenSSL REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+target_include_directories(${PROJECT_NAME} PRIVATE ${OPENSSL_INCLUDE_DIR})
+
+
+
 # 设置编译选项
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /W4)

@@ -7,21 +7,41 @@
 namespace KVCache
 {
 
+    SSD::Block::Block(SSD &ssd, int block_id) : ssd(ssd), block_id(block_id) {
+        channel_id = block_id / ssd.blocks_per_channel_;
+    }
+
+    Status SSD::Block::read(std::string *value) {
+        std::string key = ssd.block_key(channel_id, block_id);
+        rocksdb::Status status = ssd.db_->Get(rocksdb::ReadOptions(), key, value);
+        if (!status.ok())
+        {
+            return Status::Corruption("read failed");
+        }
+        return Status::OK();
+    }
+
+    Status SSD::Block::write(const std::string *value) {
+        std::string key = ssd.block_key(channel_id, block_id);
+        rocksdb::Status status = ssd.db_->Put(rocksdb::WriteOptions(), key, *value);
+        if (!status.ok())
+        {
+            return Status::Corruption("write failed");
+        }
+        return Status::OK();
+    }
+
+    rocksdb::Options SSD::default_rocksdb_options() {
+        rocksdb::Options options;
+        options.create_if_missing = true;
+        options.compression = rocksdb::kLZ4Compression;
+        options.write_buffer_size = 64 << 20;
+        return options;
+    }
+
     SSD::SSD(const std::string &path, const rocksdb::Options *options)
     {
-        if (!options)
-        {
-            options_ = rocksdb::Options();
-            options_.create_if_missing = true;
-            options_.compression = rocksdb::kLZ4Compression;
-            options_.write_buffer_size = 64 << 20; // 64MB
-            options_.max_write_buffer_number = 3;
-        }
-        else
-        {
-            options_ = *options;
-        }
-
+        options_ = options ? *options : default_rocksdb_options();
         rocksdb::Status status = rocksdb::DB::Open(options_, path, &db_);
         if (!status.ok())
         {
@@ -30,21 +50,21 @@ namespace KVCache
 
         rocksdb::ReadOptions read_options;
         std::string value;
-        status = db_->Get(read_options, kNR_BLOCKS_KEY, &value);
+        status = db_->Get(read_options, kNumBlocksKey, &value);
         if (!status.ok())
         {
             throw std::runtime_error("get nr_blocks failed");
         }
-        nr_blocks_ = std::stoi(value); // 将字符串转换为整数
+        nr_blocks_ = std::stoi(value); 
 
-        status = db_->Get(read_options, kBLOCK_SIZE_KEY, &value);
+        status = db_->Get(read_options, kBlockSizeKey, &value);
         if (!status.ok())
         {
             throw std::runtime_error("get block_size failed");
         }
         block_size_ = std::stoi(value);
 
-        status = db_->Get(read_options, kNR_CHANNELS_KEY, &value);
+        status = db_->Get(read_options, kNumChannelsKey, &value);
         if (!status.ok())
         {
             throw std::runtime_error("get nr_channels failed");
@@ -53,13 +73,13 @@ namespace KVCache
     }
 
     template <typename F>
-    Status SSD::IterateAllBlocks(F &&func)
+    Status SSD::iterate_all_blocks(F &&func)
     {
         rocksdb::ReadOptions read_options;
         read_options.prefix_same_as_start = true;
         read_options.total_order_seek = false;
         auto it(db_->NewIterator(read_options));
-        for (it->Seek(kBLOCK_PREFIX); it->Valid() && it->key().starts_with(prefix); it->Next())
+        for (it->Seek(std::format("{}/{}", kBlockPerChannelKey, channel)); it->Valid() && it->key().starts_with(kBlockPerChannelKey); it->Next())
         {
             // blocks/<channel-id>/<block-id>
             std::string key = it->key().ToString();
@@ -73,7 +93,8 @@ namespace KVCache
             std::string block_id = key.substr(delimiter + 1);
             int channel = std::stoi(channel_id);
             int block = std::stoi(block_id);
-            Status status = func(channel, block);
+            auto block = Block{block, channel, block_size_};
+            Status status = func(block);
             if (!status.ok())
             {
                 return status;
@@ -88,31 +109,20 @@ namespace KVCache
     {
         delete db_;
     }
-    std::string SSD::BlockKey(int channel, int block)
+
+    std::string SSD::block_key(int channel, int block)
     {
         return std::format("/blocks/{}/{}", channel, block);
     }
 
-    Status SSD::Read(int channel, int block, std::string *value)
+    Status SSD::read_block(int block_id, std::string *value)
     {
-        std::string key = BlockKey(channel, block);
-        rocksdb::Status status = db_->Get(rocksdb::ReadOptions(), key, value);
-        if (!status.ok())
-        {
-            return Status::Corruption("read failed");
-        }
-        return Status::OK();
+        return get_block(block_id).read(value);
     }
 
-    Status SSD::Write(int channel, int block, const std::string *value)
+    Status SSD::write_block(int block_id, const std::string *value)
     {
-        std::string key = BlockKey(channel, block);
-        rocksdb::Status status = db_->Put(rocksdb::WriteOptions(), key, *value);
-        if (!status.ok())
-        {
-            return Status::Corruption("write failed");
-        }
-        return Status::OK();
+        return get_block(block_id).write(value);
     }
 
 } // namespace ssd
