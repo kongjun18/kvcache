@@ -215,4 +215,13 @@ namespace KVCache
         }
         return dslab_base_ + (sid - nr_mslab_);
     }
+
+    SlabClass* KVCache::get_slab_class(size_t size) {
+        auto it = std::lower_bound(slab_class_table_, slab_class_table_ + nr_slab_class_, size, 
+            [](const SlabClass& sc, size_t target) { return sc.slot_size < target; });
+        if (it != (slab_class_table_ + nr_slab_class_) && it->slot_size >= size) {
+            return it;
+        }
+        return nullptr;
+    }
 }
