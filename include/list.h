@@ -75,5 +75,23 @@ static inline void list_del(struct list_head *entry) {
     n = pos->next; pos != (head); pos = n, n = pos->next,              \
     entry = (typeof(*entry) *)((char *)(pos) - offsetof(typeof(*entry), member)))
 
+class List {
+    public:
+        struct list_head list_;
+    private:
+        std::mutex mutex_;
+        size_t size_;
+    public:
+        List() {
+            INIT_LIST_HEAD(&list_);
+            size_ = 0;
+        }
+        void lock() {
+            mutex_.lock();
+        }
+        void unlock() {
+            mutex_.unlock();
+        } 
+};
 
 #endif // SIMPLE_LIST_H

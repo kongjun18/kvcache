@@ -30,6 +30,9 @@ Status Status::Corruption(const std::string& msg= std::string()) {
     return Status(kCorruption, msg);
 }
 
+Status Status::ObjectTooLarge(const std::string& msg= std::string()) {
+    return Status(kObjectTooLarge, msg);
+}
 
 }
 

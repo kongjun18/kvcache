@@ -8,6 +8,7 @@ enum Code {
     kOK,
     kNotFound,
     kCorruption,
+    kObjectTooLarge,
 };
 class Status {
 public:
@@ -21,6 +22,7 @@ public:
     static Status OK();
     static Status NotFound(const std::string& msg = std::string());
     static Status Corruption(const std::string& msg = std::string());
+    static Status ObjectTooLarge(const std::string& msg = std::string());
 private:
     Code code_;
     std::string msg_;
