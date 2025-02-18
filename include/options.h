@@ -20,7 +20,7 @@ int kSlabClassSize[kMaxSlabClassID] = {
         // When the number of free blocks hits free_slab_water_mark_high, increase ops_pool size and put free blocks back into ops_pool
         float free_block_water_mark_high;
         float free_block_slab_water_mark_low_min;
-        float max_block_slab_water_mark_low;
+        float free_block_slab_water_mark_high_max;
         bool enable_background_flush;
         bool enable_background_gc;
         Options() {
@@ -33,7 +33,7 @@ int kSlabClassSize[kMaxSlabClassID] = {
             enable_background_gc = true;
             ops_rate =  0.2;
             free_block_slab_water_mark_low_min = 0.01;
-            max_block_slab_water_mark_low = 0.2;
+            free_block_slab_water_mark_high_max = 0.2;
             free_block_water_mark_low = 0.07;
             free_block_water_mark_high = 0.16;    
         }

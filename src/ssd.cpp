@@ -21,9 +21,9 @@ namespace KVCache
         return Status::OK();
     }
 
-    Status SSD::Block::write(const std::string *value) {
+    Status SSD::Block::write(std::string_view value) {
         std::string key = ssd.block_key(channel_id, block_id);
-        rocksdb::Status status = ssd.db_->Put(rocksdb::WriteOptions(), key, *value);
+        rocksdb::Status status = ssd.db_->Put(rocksdb::WriteOptions(), key, value);
         if (!status.ok())
         {
             return Status::Corruption("write failed");
@@ -120,9 +120,14 @@ namespace KVCache
         return get_block(block_id).read(value);
     }
 
-    Status SSD::write_block(int block_id, const std::string *value)
+    Status SSD::write_block(int block_id, std::string_view value)
     {
         return get_block(block_id).write(value);
+    }
+
+    inline int SSD::channel_id(int block_id)
+    {
+        return block_id / blocks_per_channel_;
     }
 
 } // namespace ssd

@@ -1,4 +1,4 @@
-// Copy from #ifndef THREAD_SAFETY_ANALYSIS_MUTEX_H
+// Copy from https://clang.llvm.org/docs/ThreadSafetyAnalysis.html
 #ifndef THREAD_SAFETY_ANALYSIS_MUTEX_H
 #define THREAD_SAFETY_ANALYSIS_MUTEX_H
 

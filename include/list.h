@@ -53,7 +53,14 @@ static inline void list_del(struct list_head *entry) {
 #define list_for_each(pos, head)                                               \
   for (pos = (head)->next; pos != (head); pos = pos->next)
 
+#define list_for_each_with_entry(type, entry, head, member)                          \
+  for (entry = (type *)((char *)(head)->next -                       \
+                                  offsetof(type, member));           \
+       &entry->member != (head);                                               \
+       entry = (type *)((char *)(entry->member.next) -               \
+                                  offsetof(type, member)))
 // It is safe to delete nodes in list_for_each_safe
+
 //
 //
 // pos  struct list_head * - current position
@@ -62,36 +69,26 @@ static inline void list_del(struct list_head *entry) {
 #define list_for_each_safe(pos, next, head)                                       \
   for (pos = (head)->next, next = pos->next; pos != (head); pos = next, n = pos->next)
 
-#define list_for_each_with_entry(type, entry, head, member)                          \
+#define list_for_each_safe_with_entry(type, entry, head, member, next)                          \
   for (entry = (type *)((char *)(head)->next -                       \
+                                  offsetof(type, member)),           \
+       next = (type *)((char *)(entry->member.next) -               \
                                   offsetof(type, member));           \
        &entry->member != (head);                                               \
-       entry = (type *)((char *)(entry->member.next) -               \
+       entry = next,                                                          \
+       next = (type *)((char *)(next->member.next) -                \
                                   offsetof(type, member)))
 
-#define list_for_each_safe_with_entry(entry, pos, n, head, member)   \
-    for (entry = (typeof(*entry) *)((char *)(head)->next -             \
-    offsetof(typeof(*entry), member)), pos = (head)->next,             \
-    n = pos->next; pos != (head); pos = n, n = pos->next,              \
-    entry = (typeof(*entry) *)((char *)(pos) - offsetof(typeof(*entry), member)))
 
-class List {
+struct List {
     public:
         struct list_head list_;
-    private:
-        std::mutex mutex_;
         size_t size_;
-    public:
+        std::mutex mutex_;
         List() {
             INIT_LIST_HEAD(&list_);
             size_ = 0;
         }
-        void lock() {
-            mutex_.lock();
-        }
-        void unlock() {
-            mutex_.unlock();
-        } 
 };
 
 #endif // SIMPLE_LIST_H

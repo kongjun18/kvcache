@@ -4,14 +4,14 @@
 #include "rocksdb/db.h"
 #include <string>
 #include "status.h"
-using std::string;
+#include <string_view>
 namespace KVCache
 {
-    static const string kNumBlocksKey = "/nr_blocks";
-    static const string kBlockSizeKey = "/block_size";
-    static const string kNumChannelsKey = "/nr_channels";
-    static const string kBlockPerChannelKey = "/block_per_channel";
-    static const string kBlockPrefix = "/blocks";
+    static const std::string kNumBlocksKey = "/nr_blocks";
+    static const std::string kBlockSizeKey = "/block_size";
+    static const std::string kNumChannelsKey = "/nr_channels";
+    static const std::string kBlockPerChannelKey = "/block_per_channel";
+    static const std::string kBlockPrefix = "/blocks";
 
     class SSD
     {
@@ -24,7 +24,7 @@ namespace KVCache
 
             Block(SSD &ssd, int block_id);
             Status read(std::string *value);
-            Status write(const std::string *value);
+            Status write(std::string_view value);
         };
 
     public:
@@ -37,8 +37,9 @@ namespace KVCache
         rocksdb::DB *db_;
         rocksdb::Options options_;
 
+
     public:
-        explicit SSD(const string &db_path, const rocksdb::Options *options);
+        explicit SSD(const std::string &db_path, const rocksdb::Options *options);
         SSD(const SSD &other) = delete;
         SSD &operator=(const SSD &other) = delete;
 
@@ -46,9 +47,12 @@ namespace KVCache
         static rocksdb::Options default_rocksdb_options();
 
         Status read_block(int block_id, std::string *value);
-        Status write_block(int block_id, const std::string *value);
+        Status write_block(int block_id, std::string_view value);
         template <typename F>
         Status iterate_all_blocks(F &&func);
+        int channel_id(int block_id);
+
+        private:
         static std::string block_key(int channel, int block);
         Block get_block(int block_id);
 
