@@ -10,12 +10,15 @@ enum Code {
     kCorruption,
     kObjectTooLarge,
 };
+
 class Status {
 public:
+    Status() = default;
     Status(Code code, const std::string& msg) noexcept;
     ~Status() noexcept;
 
     bool ok() const;
+    bool is_not_found() const;
     Code code() const;
     std::string msg() const;
 

@@ -10,14 +10,41 @@
 #include <condition_variable>
 #include "thread_safety.h"
 #include <shared_mutex>
+#include <string_view>
+#include <string>
+#include <vector>
+#include <atomic>
+#include <cassert>
+
 namespace KVCache
 {
-    static constexpr int KB = 1024;
-    static constexpr int MB = 1024 * 1024;
-    static constexpr int GB = 1024 * MB;
-
     static constexpr int kDigestLength = 20;
 
+    struct Slot
+    {
+        struct Header
+        {
+            int key_len;
+            int value_len;
+        };
+        Header header;
+        char data[0];
+        void Write(std::string_view key, std::string_view value)
+        {
+            header.key_len = key.size();
+            header.value_len = value.size();
+            memcpy(data, key.data(), key.size());
+            memcpy(data + key.size(), value.data(), value.size());
+        }
+        std::string_view key() const
+        {
+            return std::string_view(data, header.key_len);
+        }
+        std::string_view value() const
+        {
+            return std::string_view(data + header.key_len, header.value_len);
+        }
+    };
     struct SlabInfo
     {
         int sid;
@@ -54,15 +81,33 @@ namespace KVCache
     {
         int sid;
         int cid;
+        // Only Get increases nr_alloc
         std::atomic_int nr_alloc;
         int slot_size;
         int nr_slots;
-        std::atomic_int nr_used; // number of slots actually used in the slab
+        // Number of slots actually used in the slab
+        // Del decreases nr_used.
+        // Put increases new value's nr_used and decreases old value's nr_used.
+        std::atomic_int nr_used;
         struct list_head list;
         int block_id; // only for dslab
         char data[0];
         static int slab_header_size() { return offsetof(Slab, data); }
-        Slab &operator=(const Slab &other) = default;
+        Slab &operator=(const Slab &other)
+        {
+            if (this != &other)
+            {
+                sid = other.sid;
+                cid = other.cid;
+                nr_alloc.store(other.nr_alloc.load());
+                slot_size = other.slot_size;
+                nr_slots = other.nr_slots;
+                nr_used.store(other.nr_used.load());
+                list = other.list;
+                block_id = other.block_id;
+            }
+            return *this;
+        }
         Slot *slot_alloc()
         {
             assert(!is_full());
@@ -109,32 +154,6 @@ namespace KVCache
         }
     };
 
-    struct Slot
-    {
-        struct Header
-        {
-            int key_len;
-            int value_len;
-        };
-        Header header;
-        char data[0];
-        void Write(std::string_view key, std::string_view value)
-        {
-            header.key_len = key.size();
-            header.value_len = value.size();
-            memcpy(data, key.data(), key.size());
-            memcpy(data + key.size(), value.data(), value.size());
-        }
-        std::string_view key() const
-        {
-            return std::string_view(data, header.key_len);
-        }
-        std::string_view value() const
-        {
-            return std::string_view(data + header.key_len, header.value_len);
-        }
-    };
-
     // sha1 digest
     using Digest = std::array<unsigned char, kDigestLength>;
     // TODO: change slab_id to Slab*
@@ -154,6 +173,7 @@ namespace KVCache
         Status Get(std::string_view key, std::string *value);
         Status Put(std::string_view key, std::string_view value);
         void Delete(std::string_view key);
+        int max_value_size() const { return slab_size_ - Slab::slab_header_size(); }
 
     private:
         // GC priority: the slab with smaller valid objects has higher priority
@@ -174,8 +194,10 @@ namespace KVCache
 
         std::hash<std::string_view> hasher_;
 
-        List mslab_free_;
-        List mslab_full_;
+        List mslab_free_ GUARDED_BY(mslab_free_mutex_);
+        List mslab_full_ GUARDED_BY(mslab_full_mutex_);
+        std::mutex mslab_free_mutex_;
+        std::mutex mslab_full_mutex_;
         std::vector<List> dslab_free_ GUARDED_BY(dslab_free_mutex_);
         std::vector<List> dslab_full_ GUARDED_BY(dslab_full_mutex_);
         std::mutex dslab_free_mutex_;

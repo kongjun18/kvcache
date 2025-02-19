@@ -14,6 +14,10 @@ Code Status::code() const {
     return code_;
 }
 
+bool Status::is_not_found() const {
+    return code_ == kNotFound;
+}
+
 std::string Status::msg() const {
     return msg_;
 }

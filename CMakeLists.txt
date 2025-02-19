@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
+
 # 设置项目名称和版本
 project(KVCache VERSION 0.1.0 LANGUAGES CXX)
 
@@ -9,13 +10,38 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # 选项设置
-option(KVCACHE_BUILD_TESTS "Build KVCache tests" OFF)
+option(KVCACHE_BUILD_TESTS "Build KVCache tests" ON)
 option(KVCACHE_BUILD_EXAMPLES "Build KVCache examples" OFF)
 
 # 设置输出目录
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+# 手动查找 RocksDB
+find_path(ROCKSDB_INCLUDE_DIR rocksdb/db.h
+    PATHS
+        ${CMAKE_SOURCE_DIR}/third_party/rocksdb/include
+        /usr/include
+        /usr/local/include
+)
+
+find_library(ROCKSDB_LIBRARY
+    NAMES rocksdb
+    PATHS
+        ${CMAKE_SOURCE_DIR}/third_party/rocksdb/lib
+        /usr/lib
+        /usr/local/lib
+        /usr/lib64
+        /usr/local/lib64
+)
+
+if(NOT ROCKSDB_INCLUDE_DIR OR NOT ROCKSDB_LIBRARY)
+    message(FATAL_ERROR "RocksDB not found. Please install RocksDB first.")
+endif()
+
+message(STATUS "Found RocksDB: ${ROCKSDB_LIBRARY}")
+message(STATUS "RocksDB include: ${ROCKSDB_INCLUDE_DIR}")
 
 # 创建库目标
 add_library(${PROJECT_NAME} STATIC
@@ -29,82 +55,46 @@ target_include_directories(${PROJECT_NAME}
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${ROCKSDB_INCLUDE_DIR}
 )
 
-# 下载并配置 RocksDB
-include(FetchContent)
-FetchContent_Declare(
-    rocksdb
-    GIT_REPOSITORY https://github.com/facebook/rocksdb.git
-    GIT_TAG v7.10.2
-)
-
-# RocksDB 配置
-set(ROCKSDB_BUILD_SHARED OFF CACHE BOOL "Build shared library")
-set(WITH_TESTS OFF CACHE BOOL "Build with tests")
-set(WITH_TOOLS OFF CACHE BOOL "Build with tools")
-set(WITH_BENCHMARK_TOOLS OFF CACHE BOOL "Build with benchmark tools") 
-set(WITH_CORE_TOOLS OFF CACHE BOOL "Build with core tools")
-set(WITH_GFLAGS OFF CACHE BOOL "Build with gflags")
-
-FetchContent_MakeAvailable(rocksdb)
-
-# 包含 RocksDB 头文件
-target_include_directories(${PROJECT_NAME} PRIVATE ${rocksdb_SOURCE_DIR}/include)
-include_directories(${CMAKE_SOURCE_DIR}/include)
-include_directories(${rocksdb_SOURCE_DIR}/include)
 # 链接 RocksDB
-target_link_libraries(${PROJECT_NAME} PRIVATE rocksdb)
+target_link_libraries(${PROJECT_NAME} PRIVATE ${ROCKSDB_LIBRARY})
 
 find_package(OpenSSL REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 target_include_directories(${PROJECT_NAME} PRIVATE ${OPENSSL_INCLUDE_DIR})
 
+# Google Test
+if(KVCACHE_BUILD_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG release-1.12.1
+    )
+    FetchContent_MakeAvailable(googletest)
+    
+    enable_testing()
+    add_executable(kvcache_test tests/kvcache_test.cpp)
+    target_include_directories(kvcache_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    target_link_libraries(kvcache_test PRIVATE 
+        ${PROJECT_NAME}
+        GTest::gtest_main
+        GTest::gmock
+    )
 
-
-# 设置编译选项
-if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /W4)
-else()
-    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME kvcache_test COMMAND kvcache_test)
 endif()
-
-# 添加子目录
-# if(KVCACHE_BUILD_TESTS)
-    # enable_testing()/ 
-    # add_subdirectory(tests)
-# endif()
 
 # if(KVCACHE_BUILD_EXAMPLES)
 #     add_subdirectory(examples)
 # endif()
 
-# 安装配置
-include(GNUInstallDirs)
-install(TARGETS ${PROJECT_NAME}
-    EXPORT ${PROJECT_NAME}Targets
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
 
 install(DIRECTORY include/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-
-# 导出配置
-install(EXPORT ${PROJECT_NAME}Targets
-    FILE ${PROJECT_NAME}Targets.cmake
-    NAMESPACE ${PROJECT_NAME}::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
-)
-
-# 生成版本文件
-include(CMakePackageConfigHelpers)
-write_basic_package_version_file(
-    "${PROJECT_NAME}ConfigVersion.cmake"
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY SameMajorVersion
 )
 

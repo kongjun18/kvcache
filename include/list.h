@@ -2,6 +2,7 @@
 #define SIMPLE_LIST_H
 
 #include <stddef.h>
+#include <mutex>
 
 // 定义链表节点结构
 struct list_head {
@@ -80,15 +81,15 @@ static inline void list_del(struct list_head *entry) {
                                   offsetof(type, member)))
 
 
-struct List {
-    public:
-        struct list_head list_;
-        size_t size_;
-        std::mutex mutex_;
-        List() {
-            INIT_LIST_HEAD(&list_);
-            size_ = 0;
-        }
+class List {
+public:
+    struct list_head list_;
+    size_t size_;
+
+    List() {
+        INIT_LIST_HEAD(&list_);
+        size_ = 0;
+    }
 };
 
 #endif // SIMPLE_LIST_H

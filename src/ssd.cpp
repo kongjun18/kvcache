@@ -7,11 +7,13 @@
 namespace KVCache
 {
 
-    SSD::Block::Block(SSD &ssd, int block_id) : ssd(ssd), block_id(block_id) {
+    SSD::Block::Block(SSD &ssd, int block_id) : ssd(ssd), block_id(block_id)
+    {
         channel_id = block_id / ssd.blocks_per_channel_;
     }
 
-    Status SSD::Block::read(std::string *value) {
+    Status SSD::Block::read(std::string *value)
+    {
         std::string key = ssd.block_key(channel_id, block_id);
         rocksdb::Status status = ssd.db_->Get(rocksdb::ReadOptions(), key, value);
         if (!status.ok())
@@ -21,7 +23,8 @@ namespace KVCache
         return Status::OK();
     }
 
-    Status SSD::Block::write(std::string_view value) {
+    Status SSD::Block::write(std::string_view value)
+    {
         std::string key = ssd.block_key(channel_id, block_id);
         rocksdb::Status status = ssd.db_->Put(rocksdb::WriteOptions(), key, value);
         if (!status.ok())
@@ -31,7 +34,8 @@ namespace KVCache
         return Status::OK();
     }
 
-    rocksdb::Options SSD::default_rocksdb_options() {
+    rocksdb::Options SSD::default_rocksdb_options()
+    {
         rocksdb::Options options;
         options.create_if_missing = true;
         options.compression = rocksdb::kLZ4Compression;
@@ -39,9 +43,9 @@ namespace KVCache
         return options;
     }
 
-    SSD::SSD(const std::string &path, const rocksdb::Options *options)
+    SSD::SSD(const std::string &path, const rocksdb::Options &options)
     {
-        options_ = options ? *options : default_rocksdb_options();
+        options_ = options;
         rocksdb::Status status = rocksdb::DB::Open(options_, path, &db_);
         if (!status.ok())
         {
@@ -55,7 +59,7 @@ namespace KVCache
         {
             throw std::runtime_error("get nr_blocks failed");
         }
-        nr_blocks_ = std::stoi(value); 
+        nr_blocks_ = std::stoi(value);
 
         status = db_->Get(read_options, kBlockSizeKey, &value);
         if (!status.ok())
@@ -72,8 +76,66 @@ namespace KVCache
         nr_channels_ = std::stoi(value);
     }
 
+    // 2GiB
+    SSD::SSDConfig SSD::default_ssd_config()
+    {
+        SSDConfig config;
+        config.nr_channels = 8;
+        config.block_size = 8 * 1024 * 1024; // 8MB
+        config.blocks_per_channel = 256;
+        return config;
+    }
+
+SSD* SSD::create(const std::string &db_path, const SSDConfig &ssd_config, const rocksdb::Options &rocksdb_options)
+    {
+        rocksdb::DB *db = nullptr;
+        rocksdb::Status status = rocksdb::DB::Open(rocksdb_options, db_path, &db);
+        if (!status.ok())
+        {
+            return nullptr;
+        }
+
+        rocksdb::WriteOptions write_options;
+        status = db->Put(write_options, kNumBlocksKey, std::to_string(ssd_config.blocks_per_channel * ssd_config.nr_channels));
+        if (!status.ok())
+        {
+            delete db;
+            return nullptr;
+        }
+
+        status = db->Put(write_options, kBlockSizeKey, std::to_string(ssd_config.block_size));
+        if (!status.ok())
+        {
+            delete db;
+            return nullptr;
+        }
+
+        status = db->Put(write_options, kNumChannelsKey, std::to_string(ssd_config.nr_channels));
+        if (!status.ok())
+        {
+            delete db;
+            return nullptr;
+        }
+
+        for (int channel = 0; channel < ssd_config.nr_channels; channel++)
+        {
+            for (int block = 0; block < ssd_config.blocks_per_channel; block++)
+            {
+                status = db->Put(write_options, block_key(channel, block), "");
+                if (!status.ok())
+                {
+                    delete db;
+                    return nullptr;
+                }
+            }
+        }
+
+        delete db;
+        return new SSD(db_path, rocksdb_options);
+    }
+
     template <typename F>
-    Status SSD::iterate_all_blocks(F &&func)
+    void SSD::iterate_all_blocks(F &&func)
     {
         rocksdb::ReadOptions read_options;
         read_options.prefix_same_as_start = true;
@@ -94,14 +156,9 @@ namespace KVCache
             int channel = std::stoi(channel_id);
             int block = std::stoi(block_id);
             auto block = Block{block, channel, block_size_};
-            Status status = func(block);
-            if (!status.ok())
-            {
-                return status;
-            }
+            func(block);
         }
 
-        return Status::OK();
     }
 
     // TODO: finish all pending flush
