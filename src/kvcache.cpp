@@ -35,12 +35,19 @@ namespace KVCache
         }
         mslab_base_ = static_cast<Slab *>(align_ptr(mslab_base_, alignment));
         mslab_end_ = reinterpret_cast<Slab *>(reinterpret_cast<char *>(mslab_base_) + mslab_area_size);
+        gc_buffer_ = reinterpret_cast<Slab *>(reinterpret_cast<char *>(mslab_base_) + mslab_area_size - slab_size_);
         dslab_base_ = mslab_end_;
         dslab_end_ = dslab_base_ + nr_dslab_;
 
         dslab_free_.resize(ssd_->nr_channels_);
+        std::for_each(dslab_free_.begin(), dslab_free_.end(), [](auto &dslab_free)
+                      { INIT_LIST_HEAD(&dslab_free.list_); });
         dslab_full_.resize(ssd_->nr_channels_);
+        std::for_each(dslab_full_.begin(), dslab_full_.end(), [](auto &dslab_full)
+                      { INIT_LIST_HEAD(&dslab_full.list_); });
         ops_pool_.resize(ssd_->nr_channels_);
+        std::for_each(ops_pool_.begin(), ops_pool_.end(), [](auto &ops_pool)
+                      { INIT_LIST_HEAD(&ops_pool.list_); });
 
         for (size_t i = 0; i < nr_mslab_ + nr_dslab_; i++)
         {
@@ -51,7 +58,7 @@ namespace KVCache
             slab_info->nr_slots = -1;
             slab_info->block_id = -1;
             INIT_LIST_HEAD(&slab_info->list);
-            if (i < nr_mslab_)
+            if (i < (nr_mslab_ - 1))
             {
                 list_add(&slab_info->list, &mslab_free_.list_);
             }
@@ -111,6 +118,37 @@ namespace KVCache
 
     Status KVCache::Get(std::string_view key, std::string *value)
     {
+        std::shared_lock<std::shared_mutex> reader_lock(reader_mutex_);
+        auto index_entry = get_index_entry(key);
+        if (!index_entry)
+        {
+            return Status::NotFound("Key not found");
+        }
+        assert(index_entry->slab_id != -1);
+
+        auto slab = slab_by_sid(index_entry->slab_id);
+        std::string_view k, v;
+        if (slab->im_memory())
+        {
+            assert(index_entry->slot_id < slab->nr_alloc);
+            auto slot = slab->slot(index_entry->slot_id);
+            k = slot->key();
+            v = slot->value();
+        }
+        else
+        {
+            auto read_buffer = std::string();
+            auto dslab = read_dslab(slab, &read_buffer);
+            assert(dslab);
+            auto slot = dslab->slot(index_entry->slot_id);
+            k = slot->key();
+            v = slot->value();
+        }
+        if (key != k)
+        {
+            return Status::NotFound("Key not found");
+        }
+        *value = v;
         return Status::OK();
     }
 
@@ -271,7 +309,7 @@ namespace KVCache
 
             slab->cid = slab_class->cid;
             slab->slot_size = slab_class->slot_size;
-            slab->nr_slots = slab_size_ / slab_class->slot_size;
+            slab->nr_slots = (slab_size_ - Slab::slab_header_size()) / slab_class->slot_size;
             list_add(&slab->list, &slab_class->slab_partial);
             // retry
             return slot_alloc(size, slotp);
@@ -431,18 +469,7 @@ namespace KVCache
         // Update index table
         {
             std::unique_lock<std::shared_mutex> reader_lock(reader_mutex_);
-            mslab->for_each_slot([this, mslab, dslab](Slot *slot, int slot_id)
-                                 {
-                auto index_entry = get_index_entry(slot->key());
-                if (!index_entry)
-                {
-                    return true;
-                }
-                if (index_entry->slab_id == mslab->sid && index_entry->slot_id == slot_id)
-                {
-                    index_entry->slab_id = dslab->sid;
-                }
-                return true; });
+            modify_index_sid(mslab, dslab->sid);
         }
 
         // mslab -> mslab_free
@@ -507,7 +534,7 @@ namespace KVCache
 
     void KVCache::flush_mslab_to_dslab(Slab *mslab, Slab *dslab)
     {
-        auto block_data = std::string_view(reinterpret_cast<char *>(mslab->data), slab_size_);
+        auto block_data = std::string_view(reinterpret_cast<char *>(mslab), slab_size_);
         auto status = ssd_->write_block(dslab->block_id, block_data);
         // TODO: handle error
         if (!status.ok())
@@ -552,7 +579,8 @@ namespace KVCache
             std::unique_lock<std::mutex> dslab_full_lock(dslab_full_mutex_);
             while (nr_dslab_to_drop > 0)
             {
-                auto channel = next_channel(next_gc_channel_++) % ssd_->nr_channels_;
+                auto channel = next_channel(next_ops_pool_remove_channel_) % ssd_->nr_channels_;
+                next_ops_pool_remove_channel_ = (next_ops_pool_remove_channel_ + 1) % ssd_->nr_channels_;
                 if (!list_empty(&dslab_full_[channel].list_))
                 {
                     auto dslab = list_first_entry(&dslab_full_[channel].list_, Slab, list);
@@ -568,11 +596,12 @@ namespace KVCache
         int i = 0;
         Slab *dslab = nullptr;
         Slab *next = nullptr;
+        static std::string read_buffer(slab_size_, '\0');
         list_for_each_with_entry(Slab, dslab, &to_drop, list)
         {
-            auto slab = read_dslab(dslab);
+            auto slab = read_dslab(dslab, &read_buffer);
             std::unique_lock<std::shared_mutex> reader_lock(reader_mutex_);
-            evict_dslab(slab);
+            evict_dslab(slab, &read_buffer);
         }
         list_for_each_safe_with_entry(Slab, dslab, &to_drop, list, next)
         {
@@ -600,9 +629,9 @@ namespace KVCache
         }
     }
 
-    void KVCache::evict_dslab(const Slab *dslab)
+    void KVCache::evict_dslab(const Slab *dslab, std::string *read_buffer)
     {
-        auto mslab = read_dslab(dslab);
+        auto mslab = read_dslab(dslab, read_buffer);
         mslab->for_each_slot([this, dslab](Slot *slot, int slot_id)
                              {
                                 del_index_entry(slot->key());
@@ -626,16 +655,14 @@ namespace KVCache
     }
 
     // read_dslab return a fake mslab that can be used to read slots of dslab
-    // read_dslab is forbidden to be called concurrently.
-    Slab *KVCache::read_dslab(const Slab *dslab)
+    Slab *KVCache::read_dslab(const Slab *dslab, std::string *read_buffer)
     {
-        static std::string read_buffer(slab_size_, '\0');
-        auto status = ssd_->read_block(dslab->block_id, &read_buffer);
+        auto status = ssd_->read_block(dslab->block_id, read_buffer);
         if (!status.ok())
         {
             throw std::runtime_error("Failed to read block");
         }
-        auto slab = reinterpret_cast<Slab *>(read_buffer.data());
+        auto slab = reinterpret_cast<Slab *>(read_buffer->data());
         // Copy fields manually since assignment operator is deleted
         slab->sid = dslab->sid;
         slab->cid = dslab->cid;
@@ -670,28 +697,195 @@ namespace KVCache
             }
         }
 
-
         // Calculate the number of ops dslab needed for GC for each slab_class
+        auto slab_class_to_drop = std::vector<std::vector<Slab *>>(options_.nr_slab_class);
         while (!pq.empty())
         {
             auto dslab = pq.top();
             pq.pop();
+            // Descending order based on the number of used slots
+            slab_class_to_drop[dslab->cid].push_back(dslab);
         }
-            // auto mslab = read_dslab(dslab);
-            // mslab->for_each_slot([this, dslab](Slot *slot, int slot_id)
-            // {
-            //     auto index_entry = get_index_entry(slot->key());
-            //     if (!index_entry)
-            //     {
-            //         return true;
-            //     }
-            //     // Old version or collisioned key
-            //     if (!(index_entry->slab_id == dslab->sid && index_entry->slot_id == slot_id))
-            //     {
-            //         return true;
-            //     }
 
-            //     return true;
-            // })
+        static std::string read_buffer(slab_size_, '\0');
+        auto free_list = std::vector<struct list_head>(ssd_->nr_channels_);
+        std::for_each(free_list.begin(), free_list.end(), [](auto &list_head)
+                      { INIT_LIST_HEAD(&list_head); });
+        auto ops_size = ops_pool_size_;
+        for (int i = 0; i < options_.nr_slab_class; i++)
+        {
+            auto nr_evicted_slots = 0;
+            auto to_drop = std::vector<Slab *>();
+            auto objects_enough = false;
+
+            while (!slab_class_to_drop[i].empty())
+            {
+                auto dslab = slab_class_to_drop[i].back();
+                auto nr_used = dslab->nr_used.load();
+                auto nr_total_slots = dslab->nr_slots;
+                auto nr_slots_will_be_evicted = (nr_used + nr_evicted_slots);
+                // Accumulate enough valid objects to move to evict_buffer
+                if (nr_slots_will_be_evicted > nr_total_slots && objects_enough)
+                {
+                    if (to_drop.size() > 1)
+                    {
+                        if (ops_pool_size_ <= 0)
+                        {
+                            goto tune_ops_pool_size;
+                        }
+                        gc_dslabs(to_drop, &read_buffer, free_list);
+                        objects_enough = false;
+                        to_drop.clear();
+                        nr_evicted_slots = 0;
+                    }
+                    // to_drop.size() == 1 means that drop a full dslab need to
+                    // consume a ops_pool dslab, which is meaningless. We have
+                    // to stop here because other full dslabs have move used slots.
+                    break;
+                }
+                slab_class_to_drop[i].pop_back();
+                to_drop.push_back(dslab);
+                nr_evicted_slots += nr_used;
+                if (nr_evicted_slots >= 0.8 * nr_total_slots)
+                {
+                    objects_enough = true;
+                }
+            }
+            if (to_drop.size() > 1)
+            {
+                if (ops_pool_size_ <= 0)
+                {
+                    goto tune_ops_pool_size;
+                }
+                gc_dslabs(to_drop, &read_buffer, free_list);
+            }
+        }
+
+    tune_ops_pool_size:
+        //  tune ops_pool size
+        int new_ops_size = ops_size;
+        {
+            std::unique_lock<std::mutex> dslab_free_lock(dslab_free_mutex_);
+            // Hit high water mark, increase high water mark
+            if (nr_free_dslab_ > free_block_water_mark_high_)
+            {
+                free_block_water_mark_low_ = std::max(free_block_water_mark_low_ - 10, free_block_water_mark_low_min_);
+                free_block_water_mark_high_ = std::max(free_block_water_mark_high_ - 10, static_cast<int>(1.1 * free_block_water_mark_low_));
+                new_ops_size = std::max(10, ops_size - 1);
+            }
+            // quick_gc handles low water mark case.
+            else if (nr_free_dslab_ < free_block_water_mark_low_)
+            {
+                // DO NOTHING.
+            }
+            else
+            { // Normal water mark
+                new_ops_size = ops_size;
+            }
+        }
+        // Reclaim dslabs back to ops_pool_ and dslab_free_
+        for (int channel = 0, i = 0; i < new_ops_size; i++)
+        {
+            channel = next_channel(channel) % ssd_->nr_channels_;
+            assert(!list_empty(&free_list[channel]));
+            auto dslab = list_first_entry(&free_list[channel], Slab, list);
+            list_del(&dslab->list);
+            list_add(&dslab->list, &ops_pool_[channel].list_);
+            ops_pool_[channel].size_++;
+            ops_pool_size_++;
+        }
+        {
+            std::unique_lock<std::mutex> dslab_free_lock(dslab_free_mutex_);
+            for (int channel = 0; channel < ssd_->nr_channels_; channel++)
+            {
+                while (!list_empty(&free_list[channel]))
+                {
+                    auto dslab = list_first_entry(&free_list[channel], Slab, list);
+                    list_del(&dslab->list);
+                    list_add(&dslab->list, &dslab_free_[channel].list_);
+                    dslab_free_[channel].size_++;
+                    nr_free_dslab_++;
+                }
+            }
+        }
     }
+
+    void KVCache::gc_dslabs(std::vector<Slab *> &to_drop, std::string *read_buffer, std::vector<struct list_head> &free_list)
+    {
+        // Get an ops slab
+        Slab *ops_slab = nullptr;
+        for (int begin = next_ops_pool_remove_channel_, channel = next_channel(begin); channel != begin; channel = next_channel(channel))
+        {
+            if (!list_empty(&free_list[channel]))
+            {
+                ops_slab = list_first_entry(&ops_pool_[channel].list_, Slab, list);
+                list_del(&ops_slab->list);
+                ops_pool_[channel].size_--;
+                ops_pool_size_--;
+                break;
+            }
+        }
+
+        // Modify dslab_full_
+        {
+            std::unique_lock<std::mutex> slab_full_lock(dslab_full_mutex_);
+
+            ops_slab->reset();
+            list_add(&ops_slab->list, &dslab_full_[ssd_->channel_id(ops_slab->block_id)].list_);
+            dslab_full_[ssd_->channel_id(ops_slab->block_id)].size_--;
+
+            for (auto dslab : to_drop)
+            {
+                list_del(&dslab->list);
+                dslab->reset();
+                list_add(&dslab->list, &free_list[ssd_->channel_id(dslab->block_id)]);
+            }
+        }
+
+        // Move valid objects to gc_buffer_ and modify index entries
+        assert(ops_slab);
+        gc_buffer_->reset();
+        for (auto dslab : to_drop)
+        {
+            gc_buffer_->slot_size = dslab->slot_size;
+            auto mslab = read_dslab(dslab, read_buffer);
+            std::unique_lock<std::shared_mutex> reader_lock(reader_mutex_);
+            mslab->for_each_slot([this, dslab](Slot *slot, int slot_id)
+                                 {
+                auto index_entry = get_index_entry(slot->key());
+                if (index_entry) {
+                    if (index_entry->slab_id == dslab->sid && index_entry->slot_id == slot_id) {
+                        auto new_slot = gc_buffer_->slot_alloc();
+                        assert(new_slot);
+                        new_slot->Write(slot->key(), slot->value());
+                        index_entry->slab_id = gc_buffer_->sid;
+                        index_entry->slot_id = slot_id;
+                    }   
+                }
+                return true; });
+        }
+        // Move valid objects to disk and modify index entries
+        flush_mslab_to_dslab(gc_buffer_, ops_slab);
+        {
+            std::unique_lock<std::shared_mutex> reader_lock(reader_mutex_);
+            modify_index_sid(gc_buffer_, ops_slab->sid);
+        }
+    }
+
+    void KVCache::modify_index_sid(Slab *mslab, int sid)
+    {
+        mslab->for_each_slot([this, mslab, sid](Slot *slot, int slot_id)
+                             {
+                auto index_entry = get_index_entry(slot->key());
+                if (!index_entry)
+                {
+                    return true;
+                }
+                if (index_entry->slab_id == mslab->sid && index_entry->slot_id == slot_id)
+                {
+                    index_entry->slab_id = sid;
+                }
+                return true; });
+    }
+
 }

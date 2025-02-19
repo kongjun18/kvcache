@@ -39,7 +39,7 @@ namespace KVCache
         int slot_size;
         int nr_mslab;
         int nr_dslab;
-        // slab_partial doesn't need to be protected by mutex, 
+        // slab_partial doesn't need to be protected by mutex,
         // because it's only accessed by the writer thread.
         struct list_head slab_partial;
     };
@@ -54,7 +54,7 @@ namespace KVCache
     {
         int sid;
         int cid;
-        int nr_alloc;
+        std::atomic_int nr_alloc;
         int slot_size;
         int nr_slots;
         std::atomic_int nr_used; // number of slots actually used in the slab
@@ -62,7 +62,7 @@ namespace KVCache
         int block_id; // only for dslab
         char data[0];
         static int slab_header_size() { return offsetof(Slab, data); }
-        Slab& operator=(const Slab &other) = default;
+        Slab &operator=(const Slab &other) = default;
         Slot *slot_alloc()
         {
             assert(!is_full());
@@ -74,6 +74,11 @@ namespace KVCache
         inline bool is_full()
         {
             return nr_alloc == nr_slots;
+        }
+
+        inline bool im_memory()
+        {
+            return block_id == -1;
         }
 
         template <typename T>
@@ -88,6 +93,11 @@ namespace KVCache
                 }
             }
         }
+        Slot *slot(int i)
+        {
+            return reinterpret_cast<Slot *>(data + slot_size * i);
+        }
+
         void reset()
         {
             cid = -1;
@@ -143,15 +153,18 @@ namespace KVCache
 
         Status Get(std::string_view key, std::string *value);
         Status Put(std::string_view key, std::string_view value);
-        Status Delete(std::string_view key);
+        void Delete(std::string_view key);
 
     private:
         // GC priority: the slab with smaller valid objects has higher priority
-        struct SlabGCPriorityComparator {
-            bool operator()(const Slab* a, const Slab* b) {
-                return a->nr_used.load()*a->slot_size < b->nr_used.load()*b->slot_size;
+        struct SlabGCPriorityComparator
+        {
+            bool operator()(const Slab *a, const Slab *b)
+            {
+                return a->nr_used.load() * a->slot_size < b->nr_used.load() * b->slot_size;
             }
         };
+
     private:
         std::unique_ptr<SSD> ssd_;
         Options options_;
@@ -192,10 +205,12 @@ namespace KVCache
         std::mutex index_mutex_;
 
         std::mutex writer_mutex_;
+        // All writes on index and slab it points to should be protected by reader_mutex_,
+        // except for Slab::nr_used and Slab::nr_alloc.
         std::shared_mutex reader_mutex_;
 
         std::condition_variable flush_signal_;
-        std::condition_variable flush_finished_signal_;                                 
+        std::condition_variable flush_finished_signal_;
         std::thread slab_flush_thread_;
         std::atomic_flag slab_flush_thread_started_;
         std::condition_variable gc_signal_;
@@ -203,9 +218,11 @@ namespace KVCache
         std::thread slab_gc_thread_;
         std::atomic_flag slab_gc_thread_started_;
         std::mutex gc_mutex_;
+        Slab *gc_buffer_;
+        // Only accessed by flush thread
         int next_mslab_flush_channel_ = 0;
-        int next_ops_pool_remove_channel_ = 0 ;
-        int next_gc_channel_ = 0;
+        // Only accessed by gc thread
+        int next_ops_pool_remove_channel_ = 0;
         int free_block_water_mark_low_;
         int free_block_water_mark_high_;
         int free_block_water_mark_low_min_;
@@ -238,7 +255,7 @@ namespace KVCache
         int next_channel(int current_channel);
         void flush_mslab_to_dslab(Slab *mslab, Slab *dslab);
 
-        // Self-tuning feedback-based OPS management algorithm  
+        // Self-tuning feedback-based OPS management algorithm
         // 1. If the number of ops blocks is less than free_block_water_mark_low_,
         //    move some ops blocks to dslab_free_.
         // 2. If the number of ops blocks is greater than free_block_water_mark_high_,
@@ -246,8 +263,14 @@ namespace KVCache
         void tune_ops_pool_size() EXCLUDES(gc_mutex_);
         void quick_gc();
         void normal_gc();
-        void evict_dslab(const Slab *mslab);
-        Slab* read_dslab(const Slab *dslab);
+        // Delete all index entries of the dslab
+        void evict_dslab(const Slab *dslab, std::string *read_buffer);
+        Slab *read_dslab(const Slab *dslab, std::string *read_buffer);
+        // GC all full dslabs in to_drop, the valid objects to ops_slab,
+        // and add freed dslabs to free_list.
+        void gc_dslabs(std::vector<Slab *> &to_drop, std::string *read_buffer, std::vector<struct list_head> &free_list);
+        // modify_index_sid modifies sid of index entries in mslab to sid
+        void modify_index_sid(Slab *mslab, int sid);
     };
 } // namespace KVCache
 #endif
