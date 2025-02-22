@@ -5,12 +5,10 @@ build:
 	@cd build && cmake --build . -j$(shell nproc)
 
 test: build
-	@cd build && ctest --output-on-failure
+	@build/bin/kvcache_test
 
 clean:
 	@rm -rf build
 
 benchmark: build
-	@echo "Running benchmarks..."
-	@./build/bin/kvcache_benchmark_test --gtest_filter=*Benchmark*
-
+	@build/bin/kvcache_test --gtest_filter='KVCacheTest.Benchmark*'
