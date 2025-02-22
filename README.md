@@ -12,7 +12,7 @@ This repository has done the following work:
 
 KVCache requires the following dependencies:
 
-- C++20 compiler
+- C++23 compiler
 - CMake 3.20+
 - RocksDB
 - OpenSSL
