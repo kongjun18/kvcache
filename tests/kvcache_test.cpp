@@ -322,7 +322,6 @@ TEST_F(KVCacheTest, BenchmarkPutAndGet4SSDWithRandomKeyAndValue) {
     double write_seconds = write_duration.count();
     double read_seconds = read_duration.count();
 
-    // 确保时间不为零
     ASSERT_GT(write_seconds, 0.0) << "Write duration too short to measure";
     ASSERT_GT(read_seconds, 0.0) << "Read duration too short to measure";
     std::cout << "write_seconds: " << write_seconds << " read_seconds: " << read_seconds << std::endl;
