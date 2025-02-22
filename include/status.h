@@ -9,16 +9,19 @@ enum Code {
     kNotFound,
     kCorruption,
     kObjectTooLarge,
+    kShutdown,
 };
 
 class Status {
 public:
     Status() = default;
     Status(Code code, const std::string& msg) noexcept;
-    ~Status() noexcept;
+    ~Status()= default;
 
     bool ok() const;
     bool is_not_found() const;
+    bool is_object_too_large() const;
+    bool is_shutdown() const;
     Code code() const;
     std::string msg() const;
 
@@ -26,6 +29,7 @@ public:
     static Status NotFound(const std::string& msg = std::string());
     static Status Corruption(const std::string& msg = std::string());
     static Status ObjectTooLarge(const std::string& msg = std::string());
+    static Status Shutdown(const std::string& msg = std::string());
 private:
     Code code_;
     std::string msg_;

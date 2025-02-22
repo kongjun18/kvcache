@@ -29,6 +29,7 @@ namespace KVCache
         };
         Header header;
         char data[0];
+        static constexpr size_t header_size() { return offsetof(Slot, data); }        
         void Write(std::string_view key, std::string_view value)
         {
             header.key_len = key.size();
@@ -92,7 +93,7 @@ namespace KVCache
         struct list_head list;
         int block_id; // only for dslab
         char data[0];
-        static int slab_header_size() { return offsetof(Slab, data); }
+        static constexpr size_t header_size() { return offsetof(Slab, data); }
         Slab &operator=(const Slab &other)
         {
             if (this != &other)
@@ -113,7 +114,7 @@ namespace KVCache
             assert(!is_full());
             auto slot = reinterpret_cast<Slot *>(data + slot_size * nr_alloc);
             nr_alloc++;
-            nr_used.fetch_add(1);
+            nr_used++;
             return slot;
         }
         inline bool is_full()
@@ -168,12 +169,15 @@ namespace KVCache
     class KVCache
     {
     public:
-        KVCache(SSD *ssd, const Options &options);
+        KVCache(SSD *ssd, const Options &options = Options::DefaultOptions());
+        ~KVCache();
 
         Status Get(std::string_view key, std::string *value);
         Status Put(std::string_view key, std::string_view value);
         void Delete(std::string_view key);
-        int max_value_size() const { return slab_size_ - Slab::slab_header_size(); }
+        int max_kv_size() const {return slab_class_table_[nr_slab_class_ - 1].slot_size - Slot::header_size();}
+
+        static std::vector<int> default_slab_class_size(int slab_size, int min_value_size, int nr_slab_class);
 
     private:
         // GC priority: the slab with smaller valid objects has higher priority
@@ -186,29 +190,33 @@ namespace KVCache
         };
 
     private:
-        std::unique_ptr<SSD> ssd_;
+        SSD *ssd_;
         Options options_;
-        int slab_size_;
-        int nr_mslab_;
-        int nr_dslab_;
+        int slab_size_ = 0;
+        int nr_mslab_ = 0;
+        int nr_dslab_ = 0;
 
         std::hash<std::string_view> hasher_;
 
+        // Put remove slab from mslab_free_ and add to mslab_full_
+        // Flush thread will remove slab from mslab_full_ and add to mslab_free_
         List mslab_free_ GUARDED_BY(mslab_free_mutex_);
         List mslab_full_ GUARDED_BY(mslab_full_mutex_);
         std::mutex mslab_free_mutex_;
         std::mutex mslab_full_mutex_;
+        // Flush thread will remove slab from dslab_free_ and add to dslab_full_
+        // GC thread will remove slab from dslab_full_ and add to dslab_free_
         std::vector<List> dslab_free_ GUARDED_BY(dslab_free_mutex_);
         std::vector<List> dslab_full_ GUARDED_BY(dslab_full_mutex_);
         std::mutex dslab_free_mutex_;
         std::mutex dslab_full_mutex_;
         std::vector<List> ops_pool_;
-        int max_ops_pool_size_;
-        int ops_pool_size_;
-        int nr_free_dslab_ GUARDED_BY(dslab_free_mutex_);
+        int max_ops_pool_size_ = 0;
+        int ops_pool_size_ = 0;
+        int nr_free_dslab_ GUARDED_BY(dslab_free_mutex_) = 0;
 
         SlabClass *slab_class_table_;
-        int nr_slab_class_;
+        int nr_slab_class_ = 0;
 
         // mmap area
         // [mslab_base, mslab_end) actually store mslab
@@ -222,7 +230,7 @@ namespace KVCache
 
         // hash table for index
         struct list_head *index_table_ GUARDED_BY(index_mutex_);
-        int index_table_size_;
+        int index_table_size_ = 0;
         struct list_head free_index_entry_ GUARDED_BY(index_mutex_);
         std::mutex index_mutex_;
 
@@ -245,14 +253,17 @@ namespace KVCache
         int next_mslab_flush_channel_ = 0;
         // Only accessed by gc thread
         int next_ops_pool_remove_channel_ = 0;
-        int free_block_water_mark_low_;
-        int free_block_water_mark_high_;
-        int free_block_water_mark_low_min_;
-        int free_block_water_mark_high_max_;
+        int free_block_water_mark_low_ = 0;
+        int free_block_water_mark_high_ = 0;
+        int free_block_water_mark_low_min_ = 0;
+        int free_block_water_mark_high_max_ = 0;
 
+        // Shutndown
+        std::atomic_bool shutdown_;
     private:
         void slab_init();
         void index_init();
+        void slab_class_init();
 
         IndexEntry *index_entry_alloc(std::string_view key);
         void index_entry_free(IndexEntry *entry);
@@ -271,9 +282,9 @@ namespace KVCache
         bool in_memory(int sid);
 
         void slab_flush();
-        void do_slab_flush();
+        bool do_slab_flush();
         void slab_gc() EXCLUDES(gc_mutex_);
-        void do_slab_gc() EXCLUDES(gc_mutex_);
+        bool do_slab_gc() EXCLUDES(gc_mutex_);
         int next_channel(int current_channel);
         void flush_mslab_to_dslab(Slab *mslab, Slab *dslab);
 
@@ -283,16 +294,18 @@ namespace KVCache
         // 2. If the number of ops blocks is greater than free_block_water_mark_high_,
         //    start GC to reclaim some full dslab back to ops_pool_.
         void tune_ops_pool_size() EXCLUDES(gc_mutex_);
-        void quick_gc();
-        void normal_gc();
+        bool quick_gc();
+        bool normal_gc();
         // Delete all index entries of the dslab
-        void evict_dslab(const Slab *dslab, std::string *read_buffer);
+        void evict_dslab(Slab *dslab, std::string *read_buffer);
         Slab *read_dslab(const Slab *dslab, std::string *read_buffer);
         // GC all full dslabs in to_drop, the valid objects to ops_slab,
         // and add freed dslabs to free_list.
-        void gc_dslabs(std::vector<Slab *> &to_drop, std::string *read_buffer, std::vector<struct list_head> &free_list);
-        // modify_index_sid modifies sid of index entries in mslab to sid
-        void modify_index_sid(Slab *mslab, int sid);
+        void gc_dslabs(std::vector<Slab *> &to_drop, std::string *read_buffer, std::vector<List> &free_list);
+        // modify_index_to modifies index entries in src to dst
+        void modify_index_to(Slab *src, Slab *dst);
+        bool check_ops_pool();
+
     };
 } // namespace KVCache
 #endif

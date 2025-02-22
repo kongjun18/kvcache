@@ -44,7 +44,7 @@ static inline void list_add_tail(struct list_head *newh,
 static inline void list_del(struct list_head *entry) {
   entry->prev->next = entry->next;
   entry->next->prev = entry->prev;
-  entry->next = entry->prev = nullptr;
+  entry->next = entry->prev = entry;
 }
 
 // list_for_each doesn't support deletion.

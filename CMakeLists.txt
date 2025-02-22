@@ -1,5 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
-
+cmake_minimum_required(VERSION 3.20)
 
 # 设置项目名称和版本
 project(KVCache VERSION 0.1.0 LANGUAGES CXX)
@@ -18,7 +17,6 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
-# 手动查找 RocksDB
 find_path(ROCKSDB_INCLUDE_DIR rocksdb/db.h
     PATHS
         ${CMAKE_SOURCE_DIR}/third_party/rocksdb/include
@@ -40,15 +38,23 @@ if(NOT ROCKSDB_INCLUDE_DIR OR NOT ROCKSDB_LIBRARY)
     message(FATAL_ERROR "RocksDB not found. Please install RocksDB first.")
 endif()
 
+# 查找 OpenSSL
+find_package(OpenSSL REQUIRED)
+
+# 如果启用测试，查找本地 GoogleTest
+if(KVCACHE_BUILD_TESTS)
+    find_package(GTest REQUIRED)
+endif()
+
 message(STATUS "Found RocksDB: ${ROCKSDB_LIBRARY}")
 message(STATUS "RocksDB include: ${ROCKSDB_INCLUDE_DIR}")
 
-# 创建库目标
 add_library(${PROJECT_NAME} STATIC
     src/kvcache.cpp
+    src/status.cpp
+    src/ssd.cpp
 )
 
-# 设置库的包含目录
 target_include_directories(${PROJECT_NAME}
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -56,37 +62,34 @@ target_include_directories(${PROJECT_NAME}
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${ROCKSDB_INCLUDE_DIR}
+        ${OPENSSL_INCLUDE_DIR}
 )
 
-# 链接 RocksDB
 target_link_libraries(${PROJECT_NAME} PRIVATE ${ROCKSDB_LIBRARY})
-
-find_package(OpenSSL REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-target_include_directories(${PROJECT_NAME} PRIVATE ${OPENSSL_INCLUDE_DIR})
 
 # Google Test
 if(KVCACHE_BUILD_TESTS)
-    include(FetchContent)
-    FetchContent_Declare(
-        googletest
-        GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG release-1.12.1
-    )
-    FetchContent_MakeAvailable(googletest)
-    
     enable_testing()
+    
+    # 原有的单元测试
     add_executable(kvcache_test tests/kvcache_test.cpp)
-    target_include_directories(kvcache_test PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
+    target_link_libraries(kvcache_test PRIVATE
+        ${PROJECT_NAME}
+        GTest::gtest_main
+        GTest::gmock
     )
-    target_link_libraries(kvcache_test PRIVATE 
+    
+    # 新增的基准测试
+    add_executable(kvcache_benchmark_test tests/kvcache_benchmark_test.cpp)
+    target_link_libraries(kvcache_benchmark_test PRIVATE
         ${PROJECT_NAME}
         GTest::gtest_main
         GTest::gmock
     )
 
     add_test(NAME kvcache_test COMMAND kvcache_test)
+    add_test(NAME kvcache_benchmark_test COMMAND kvcache_benchmark_test)
 endif()
 
 # if(KVCACHE_BUILD_EXAMPLES)
@@ -94,7 +97,17 @@ endif()
 # endif()
 
 
-install(DIRECTORY include/
+# Install library targets
+install(TARGETS ${PROJECT_NAME}
+    EXPORT ${PROJECT_NAME}Targets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+# Install header files
+install(FILES include/kvcache.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 

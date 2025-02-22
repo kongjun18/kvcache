@@ -6,6 +6,7 @@
 #include "status.h"
 #include <string_view>
 #include "ssd.h"
+#include <iostream>
 namespace KVCache
 {
     static const std::string kNumBlocksKey = "/nr_blocks";
@@ -28,7 +29,7 @@ namespace KVCache
             Status write(std::string_view value);
         };
 
-        struct SSDConfig
+        struct Config
         {
             int nr_channels;
             int block_size;
@@ -50,11 +51,8 @@ namespace KVCache
         SSD(const std::string &db_path, const rocksdb::Options &options);
         SSD(const SSD &other) = delete;
         SSD &operator=(const SSD &other) = delete;
-
-        static SSDConfig default_ssd_config();
-        static SSD *create(const std::string &db_path) { return create(db_path, default_ssd_config()); }
-        static SSD *create(const std::string &db_path, const SSDConfig &config) { return create(db_path, config, default_rocksdb_options()); }
-        static SSD *create(const std::string &db_path, const SSDConfig &config, const rocksdb::Options &rocksdb_options);
+        
+        static Status create(const std::string &db_path, SSD **ssd, const Config &config, const rocksdb::Options &rocksdb_options= default_rocksdb_options());
 
         ~SSD();
         static rocksdb::Options default_rocksdb_options();
@@ -68,8 +66,13 @@ namespace KVCache
             read_options.prefix_same_as_start = true;
             read_options.total_order_seek = false;
             auto it(db_->NewIterator(read_options));
-            for (it->Seek(std::format("{}/", kBlockPrefix)); it->Valid() && it->key().starts_with(kBlockPerChannelKey); it->Next())
+            for (it->Seek(kBlockPrefix); it->Valid(); it->Next()) 
             {
+                // Check if key still has the prefix
+                if (!it->key().starts_with(kBlockPrefix)) {
+                    break;
+                }
+
                 // blocks/<channel-id>/<block-id>
                 std::string key = it->key().ToString();
                 size_t start = strlen("/blocks/");
@@ -78,6 +81,7 @@ namespace KVCache
                 {
                     continue;
                 }
+                
                 std::string channel_id = key.substr(start, delimiter - start);
                 std::string block_id = key.substr(delimiter + 1);
                 int channel = std::stoi(channel_id);

@@ -7,134 +7,346 @@
 #include <chrono>
 #include "kvcache.h"
 #include "rocksdb/db.h"
-
+#include <filesystem>
 
 class KVCacheTest : public ::testing::Test {
 protected:
-    void SetUp() override {
-        std::string dbPath = "./test.db";
-        auto ssd = KVCache::SSD::create(dbPath);
-        ASSERT_TRUE(ssd != nullptr);
+    static std::string db_path_;
+    static KVCache::SSD *ssd_;
+    std::unique_ptr<KVCache::KVCache> cache_;
 
-        cache_ = std::make_unique<KVCache::KVCache>(ssd);
+    size_t random_data_size() {
+        return 8 + (std::rand() % (cache_->max_kv_size() - 8 + 1));
     }
 
-    std::unique_ptr<KVCache::KVCache> cache_;
+    // I want to keep using my laptop for a few more years,
+    // so I use a small write workload to reduce disk wear out.
+    static void SetUpTestSuite() {
+        db_path_ = std::format("./test.db.{}", std::this_thread::get_id());
+        if (std::filesystem::exists(db_path_)) {
+            std::filesystem::remove_all(db_path_);
+        }
+
+        // 200MiB SSD
+        KVCache::SSD::Config config{
+            .nr_channels = 8,
+            .block_size = 200 * 1024, // 200 KiB
+            .blocks_per_channel = 256,
+        };
+        auto status = KVCache::SSD::create(db_path_, &ssd_, config);
+        ASSERT_TRUE(status.ok()) << status.msg();
+        
+        // Set random seed for reproducibility
+        std::srand(42);
+    }
+    void SetUp() override {
+        KVCache::Options options;
+        options.slab_mem_budget = 10 * 1024 * 1024; // 10MiB
+        options.index_mem_budget = 1 * 1024 * 1024; // 1MiB
+        options.index_table_size = 512 * 1024; // 512KiB hash bucket
+        cache_ = std::make_unique<KVCache::KVCache>(ssd_, options);
+    }
+
+    void TearDown() override {
+        cache_.reset();
+    }
+
+    static void TearDownTestSuite() {
+        if (std::filesystem::exists(db_path_)) {
+            std::filesystem::remove_all(db_path_);
+        }
+    }
 };
 
-TEST_F(KVCacheTest, BasicOperations) {
-    // Put 1M keys
+std::string KVCacheTest::db_path_;
+KVCache::SSD *KVCacheTest::ssd_;
+
+// Put - GET - Delete
+// Put 1M keys, totally 1M*12*2=24MiB data(key+value), 
+// which is big enough to trigger GC.
+TEST_F(KVCacheTest, TestBasicOperations) {
     KVCache::Status status;
-    for (int i = 0; i < 1000000; i++) {
-        std::string key = "test_key_" + std::to_string(i);
-        ASSERT_TRUE(cache_->Put(key, key).ok());
+    int num_keys = 1000000;
+    for (int i = 0; i < num_keys; i++) {
+        std::string key = std::format("test_key_{}", i);
+        std::cout << "Put key " << key << std::endl;
+        status = cache_->Put(key, key);
+        ASSERT_TRUE(status.ok()) << status.msg();
     }
 
     // Get and verify all keys
-    for (int i = 0; i < 1000000; i++) {
-        std::string key = "test_key_" + std::to_string(i);
+    for (int i = 0; i < num_keys; i++) {
+        std::string key = std::format("test_key_{}", i);
+        std::cout << "Get key " << key << std::endl;
         std::string value;
         status = cache_->Get(key, &value);
         if (status.is_not_found()) {
             continue;
         }
-        ASSERT_TRUE(status.ok());
-        ASSERT_EQ(value, key);
+        ASSERT_TRUE(status.ok()) << status.msg();
+        ASSERT_EQ(value, key) << "Value mismatch for key " << key;
     }
 
     // Delete all keys
-    for (int i = 0; i < 1000000; i++) {
-        std::string key = "test_key_" + std::to_string(i);
+    for (int i = 0; i < num_keys; i++) {
+        std::string key = std::format("test_key_{}", i);
+        std::cout << "Delete key " << key << std::endl;
         cache_->Delete(key);
     }
 
     // Verify all keys are deleted
-    for (int i = 0; i < 1000000; i++) {
-        std::string key = "test_key_" + std::to_string(i);
+    for (int i = 0; i < num_keys; i++) {
+        std::string key = std::format("test_key_{}", i);
+        std::cout << "Get key " << key << std::endl;
         std::string value;
         status = cache_->Get(key, &value);
-        ASSERT_TRUE(status.is_not_found());
+        ASSERT_TRUE(status.is_not_found()) << status.msg();
     }
-
-
 }
 
-// // 并发测试
-// TEST_F(KVCacheTest, ConcurrentOperations) {
-//     const int num_threads = 4;
-//     const int ops_per_thread = 1000;
-    
-//     auto worker = [&](int id) {
-//         std::random_device rd;
-//         std::mt19937 gen(rd());
-//         std::uniform_int_distribution<> dis(0, 999);
+// Put distinct keys to trigger quick GC.
+// >
+// Normal GC can not reclaim even a bit of memory 
+// because all objects are in use, eventually 
+// hitting free_blocks_watermark_low. In this case,
+// Quick GC will be triggered to reclaim memory.
+TEST_F(KVCacheTest, TestQuickGC) {
+    const uint64_t total_size = 2 * ssd_->nr_blocks_ * ssd_->block_size_;
+    std::vector<std::string> keys;
+
+    KVCache::Status status;
+    for (uint64_t i = 0, size = 0; size < total_size; i++) {   
+        int value_size = random_data_size();
+        std::string key = std::format("test_key_{}_{}", i, value_size);
+        keys.push_back(key);
         
-//         for (int i = 0; i < ops_per_thread; i++) {
-//             std::string key = "key" + std::to_string(id) + "_" + std::to_string(i);
-//             std::string value = "value" + std::to_string(dis(gen));
-            
-//             ASSERT_TRUE(cache_->Put(key, value).ok());
-            
-//             std::string retrieved_value;
-//             ASSERT_TRUE(cache_->Get(key, &retrieved_value).ok());
-//             EXPECT_EQ(value, retrieved_value);
-//         }
-//     };
-    
-//     std::vector<std::thread> threads;
-//     for (int i = 0; i < num_threads; i++) {
-//         threads.emplace_back(worker, i);
-//     }
-    
-//     for (auto& thread : threads) {
-//         thread.join();
-//     }
-// }
+        std::cout << "Put key " << key << std::endl;
+        status = cache_->Put(key, std::string(value_size, 'v'));
+        size += value_size;
+        if (status.is_object_too_large()) {
+            auto size = keys[i].size() + value_size;
+            ASSERT_TRUE(size > cache_->max_kv_size()) 
+                << "size: " << size << " max_kv_size: " << cache_->max_kv_size();
+            continue;
+        }
+        ASSERT_TRUE(status.ok()) << status.msg();
+    }
 
-// // 性能基准测试
-// TEST_F(KVCacheTest, PerformanceBenchmark) {
-//     const int num_operations = 10000;
-    
-//     // 写入性能测试
-//     auto start = std::chrono::high_resolution_clock::now();
-//     for (int i = 0; i < num_operations; i++) {
-//         std::string key = "bench_key" + std::to_string(i);
-//         std::string value = "bench_value" + std::to_string(i);
-//         ASSERT_TRUE(cache_->Put(key, value).ok());
-//     }
-//     auto end = std::chrono::high_resolution_clock::now();
-//     auto write_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-//     // 读取性能测试
-//     start = std::chrono::high_resolution_clock::now();
-//     std::string value;
-//     for (int i = 0; i < num_operations; i++) {
-//         std::string key = "bench_key" + std::to_string(i);
-//         ASSERT_TRUE(cache_->Get(key, &value).ok());
-//     }
-//     end = std::chrono::high_resolution_clock::now();
-//     auto read_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-//     std::cout << "性能测试结果:\n";
-//     std::cout << "写入" << num_operations << "次操作耗时: " 
-//               << write_duration.count() << "ms\n";
-//     std::cout << "读取" << num_operations << "次操作耗时: " 
-//               << read_duration.count() << "ms\n";
-// }
+    for (int i = 0; i < keys.size(); i++) {
+        std::string value;
+        status = cache_->Get(keys[i], &value);
+        // Cache evicted or object too large
+        if (status.is_not_found()) {
+            continue;
+        }
+        ASSERT_TRUE(status.ok()) << status.msg();
+        auto value_size = std::stoi(keys[i].substr(keys[i].find_last_of('_') + 1));
+        ASSERT_EQ(value, std::string(value_size, 'v')) << status.msg();
+    }
 
-// // 边界条件测试
-// TEST_F(KVCacheTest, EdgeCases) {
-//     // 空键测试
-//     ASSERT_FALSE(cache_->Put("", "value").ok());
+    for (size_t i = 0; i < keys.size(); i++) {
+        std::cout << "Delete key " << keys[i] << std::endl;
+        cache_->Delete(keys[i]);
+    }
+
+    for (size_t i = 0; i < keys.size(); i++) {
+        std::string value;
+        status = cache_->Get(keys[i], &value);  
+        ASSERT_TRUE(status.is_not_found()) << status.msg();
+    }
+}
+
+// Put a lot of same keys with similar 
+// value sizes to trigger normal GC.
+TEST_F(KVCacheTest, TestNormalGC) {
+    const uint64_t total_size = 2 * ssd_->nr_blocks_ * ssd_->block_size_;
+    size_t size = 0;
+    std::unordered_map<std::string, int> key_2_size;
+    auto max_value_size = cache_->max_kv_size();
+    auto fixed_random_size = [this, max_value_size]() {
+        static auto sizes = std::vector<int>{max_value_size/4, max_value_size/8, max_value_size/16, max_value_size/32};
+        return sizes[std::rand() % sizes.size()];
+    };
+
+    KVCache::Status status;
+    const int max_key_id = 100;
+    for (uint64_t i = 0, size = 0; size < total_size; i=(i+1)%max_key_id) {   
+        int value_size = fixed_random_size();
+        std::string key = std::format("test_key_{}", i);
+        key_2_size[key] = value_size;
+        
+        std::cout << "Put key " << key << std::endl;
+        status = cache_->Put(key, std::string(value_size, 'v'));
+        size += value_size;
+        std::cout << std::format("Put {}/{}", size, total_size) << std::endl;
+        if (status.is_object_too_large()) {
+            auto kv_size = key.size() + value_size;
+            ASSERT_TRUE(kv_size > cache_->max_kv_size()) 
+                << "size: " << kv_size << " max_kv_size: " << cache_->max_kv_size();
+            continue;
+        }
+        ASSERT_TRUE(status.ok()) << status.msg();
+    }
+
+    for (auto& [key, value_size] : key_2_size) {
+        std::string value;
+        status = cache_->Get(key, &value);
+        // Cache evicted or object too large
+        if (status.is_not_found()) {
+            continue;
+        }
+        ASSERT_TRUE(status.ok()) << status.msg();
+        ASSERT_EQ(value, std::string(value_size, 'v')) << status.msg();
+    }
+
+    for (auto& [key, value_size] : key_2_size) {
+        std::cout << "Delete key " << key << std::endl;
+        cache_->Delete(key);
+    }
+
+    for (auto& [key, value_size] : key_2_size) {
+        std::string value;
+        status = cache_->Get(key, &value);  
+        ASSERT_TRUE(status.is_not_found()) << status.msg();
+    }
+}
     
-//     // 大数据测试
-//     std::string large_value(1024 * 1024, 'x'); // 1MB value
-//     ASSERT_TRUE(cache_->Put("large_key", large_value).ok());
+
+TEST_F(KVCacheTest, TestConcurrentOperations) {
+    const int num_threads = 4;
+    const int ops_per_thread = 1000;
     
-//     std::string retrieved_value;
-//     ASSERT_TRUE(cache_->Get("large_key", &retrieved_value).ok());
-//     EXPECT_EQ(large_value, retrieved_value);
+    auto worker = [&](int id) {
+        KVCache::Status status;
+        for (int i = 0; i < ops_per_thread; i++) {
+            std::string key = std::format("key_{}_{}", id, i);
+            std::string value = std::format("value_{}", random_data_size());
+            
+            std::cout << "Put key " << key << std::endl;
+            status = cache_->Put(key, value);
+            ASSERT_TRUE(status.ok()) << status.msg();
+            
+            std::string retrieved_value;
+            status = cache_->Get(key, &retrieved_value);
+            ASSERT_TRUE(status.ok()) << status.msg();
+            EXPECT_EQ(value, retrieved_value);
+        }
+    };
     
-//     // 删除不存在的键
-//     ASSERT_FALSE(cache_->Delete("non_existent_key").ok());
-// }
+    std::vector<std::thread> threads;
+    for (int i = 0; i < num_threads; i++) {
+        threads.emplace_back(worker, i);
+    }
+    
+    for (auto& thread : threads) {
+        thread.join();
+    }
+}
+
+TEST_F(KVCacheTest, TestEdgeCases) {
+    // Empty key
+    std::cout << "Put key " << "(empty)" << std::endl;
+    auto status = cache_->Put("", "value");
+    ASSERT_TRUE(status.ok()) << status.msg();
+    
+    // Large value
+    std::string large_value(cache_->max_kv_size()/2, 'x'); 
+    std::cout << "Put key large_key" << std::endl;
+    status = cache_->Put("large_key", large_value);
+    ASSERT_TRUE(status.ok()) << status.msg();
+    
+    // Too large value
+    std::string too_large_value(2*cache_->max_kv_size(), 'x');
+    std::cout << "Put key too_large_key" << std::endl;
+    status = cache_->Put("too_large_key", too_large_value);
+    ASSERT_TRUE(status.is_object_too_large()) << status.msg();
+    
+    // Non-existent key
+    std::string retrieved_value;
+    status = cache_->Get("non_existent_key", &retrieved_value);
+    ASSERT_TRUE(status.is_not_found()) << status.msg();
+    
+    // Delete non-existent key
+    std::cout << "Delete key non_existent_key" << std::endl;
+    cache_->Delete("non_existent_key");
+}
+
+// Put 4*SSD data with random value sizes and random keys
+// and test the performance of sequential Put and Get.
+TEST_F(KVCacheTest, BenchmarkPutAndGet4SSDWithRandomKeyAndValue) {
+    std::cout << "Benchmark: Put and Get 4 SSDs with random key and value" << std::endl;
+    const size_t total_size = 2 * ssd_->nr_blocks_ * ssd_->block_size_;
+    const size_t max_keys = 1000000;
+    
+    std::unordered_map<std::string, int> key_2_size;
+    
+    KVCache::Status status;
+    size_t actual_write_bytes = 0;
+    size_t actual_read_bytes = 0;
+    size_t read_ops = 0;
+    size_t write_ops = 0;
+
+    // write performance test
+    std::string write_buffer(cache_->max_kv_size(), 'x');
+    auto write_start = std::chrono::high_resolution_clock::now();
+    for (int size = 0; actual_write_bytes < total_size; ) {
+        int key_id = std::rand() % max_keys;
+        int value_size = random_data_size();
+        size += value_size;
+
+        std::string key = std::format("bench_key_{}", key_id);
+        key_2_size[key] = value_size;
+        
+        status = cache_->Put(key, std::string_view(write_buffer.data(), value_size));
+        write_ops++;
+        if (!status.ok()) {
+            ASSERT_TRUE(status.is_object_too_large()) << status.msg();
+            continue;
+        }
+        actual_write_bytes += value_size;
+    }
+    
+    auto write_end = std::chrono::high_resolution_clock::now();
+
+    // read performance test
+    std::string value;
+    auto read_start = std::chrono::high_resolution_clock::now();
+    for (int size = 0; actual_read_bytes < total_size; ) {
+        for (auto& [key, value_size] : key_2_size) {
+            size += value_size;
+            if (size > total_size) {
+                break;
+            }
+            status = cache_->Get(key, &value);
+            read_ops++;
+            if (!status.ok()) {
+                ASSERT_TRUE(status.is_not_found()) << status.msg();
+                continue;
+            }
+            actual_read_bytes += value.size();
+        }
+    }
+    
+    auto read_end = std::chrono::high_resolution_clock::now();
+
+    auto write_duration = std::chrono::duration_cast<std::chrono::duration<double>>(write_end - write_start);
+    auto read_duration = std::chrono::duration_cast<std::chrono::duration<double>>(read_end - read_start);
+
+
+    double write_seconds = write_duration.count();
+    double read_seconds = read_duration.count();
+    
+    // 确保时间不为零
+    ASSERT_GT(write_seconds, 0.0) << "Write duration too short to measure";
+    ASSERT_GT(read_seconds, 0.0) << "Read duration too short to measure";
+    std::cout << "write_seconds: " << write_seconds << " read_seconds: " << read_seconds << std::endl;
+    std::cout << "Performance test results:\n";
+    std::cout << std::format("Write: {:.2f} ops/s, actual write {:.2f} MiB/s\n", 
+        write_ops / write_seconds,
+        actual_write_bytes / 1024.0 / 1024.0 / write_seconds);
+    std::cout << std::format("Read: {:.2f} ops/s, actual read {:.2f} MiB/s\n",
+        read_ops / read_seconds, 
+        actual_read_bytes / 1024.0 / 1024.0 / read_seconds);
+}
+
+
