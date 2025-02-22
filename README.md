@@ -52,6 +52,6 @@ Write: 9777.08 ops/s, actual write 478.72 MiB/s
 Read: 105148.54 ops/s, actual read 1098.88 MiB/s
 ```
 
-[!benchmark](./docs/images/benchmark.png)
+![benchmark](./docs/images/benchmark.png)
 
 
