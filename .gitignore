@@ -1,4 +1,5 @@
 .cache
 build
+test.db.*
 .gdb_history
 .vscode/

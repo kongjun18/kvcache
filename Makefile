@@ -8,7 +8,7 @@ test: build
 	@build/bin/kvcache_test
 
 clean:
-	@rm -rf build
+	@rm -rf build ./test.db.* test/test.db.*
 
 benchmark: build
 	@build/bin/kvcache_test --gtest_filter='KVCacheTest.Benchmark*'

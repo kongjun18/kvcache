@@ -7,7 +7,6 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
-#include "thread_safety.h"
 #include <shared_mutex>
 #include <string_view>
 #include <string>
@@ -217,21 +216,21 @@ namespace KVCache
 
         // Put remove slab from mslab_free_ and add to mslab_full_
         // Flush thread will remove slab from mslab_full_ and add to mslab_free_
-        List mslab_free_ GUARDED_BY(mslab_free_mutex_);
-        List mslab_full_ GUARDED_BY(mslab_full_mutex_);
+        List mslab_free_; // GUARDED_BY(mslab_free_mutex_)
+        List mslab_full_; // GUARDED_BY(mslab_full_mutex_)
         std::mutex mslab_free_mutex_;
         std::mutex mslab_full_mutex_;
         // Flush thread will remove slab from dslab_free_ and add to dslab_full_
         // GC thread will remove slab from dslab_full_ and add to dslab_free_
-        std::vector<List> dslab_free_ GUARDED_BY(dslab_free_mutex_);
-        std::vector<List> dslab_full_ GUARDED_BY(dslab_full_mutex_);
+        std::vector<List> dslab_free_; // GUARDED_BY(dslab_free_mutex_)
+        std::vector<List> dslab_full_; // GUARDED_BY(dslab_full_mutex_)
         std::mutex dslab_free_mutex_;
         std::mutex dslab_full_mutex_;
         std::vector<List> ops_pool_;
         int max_ops_pool_size_ = 0;
         int ops_pool_size_ = 0;
-        int nr_free_dslab_ GUARDED_BY(dslab_free_mutex_) = 0;
-        int nr_full_dslab_ = 0;
+        int nr_free_dslab_ = 0; // GUARDED_BY(dslab_free_mutex_)
+        int nr_full_dslab_ = 0; // GUARDED_BY(dslab_full_mutex_)
 
         SlabClass *slab_class_table_;
         int nr_slab_class_ = 0;
@@ -247,10 +246,10 @@ namespace KVCache
         IndexEntry *index_area_end_;
 
         // hash table for index
-        struct list_head *index_table_ GUARDED_BY(index_mutex_);
+        struct list_head *index_table_; // GUARDED_BY(index_mutex_)
         int index_table_size_ = 0;
-        struct list_head free_index_entry_ GUARDED_BY(index_mutex_);
-        std::atomic_int nr_free_index_entry_;
+        struct list_head free_index_entry_; // GUARDED_BY(index_mutex_)
+        std::atomic_int nr_free_index_entry_; // GUARDED_BY(index_mutex_)
 
         std::mutex writer_mutex_;
         // All writes on index and slab it points to should be protected by index_mutex_,
