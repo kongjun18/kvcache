@@ -4,6 +4,7 @@
 #include <openssl/evp.h>
 #include <queue>
 #include <cmath>
+#include <numeric>
 namespace KVCache
 {
     // align the pointer to the alignment(upper alignment).
@@ -97,23 +98,32 @@ namespace KVCache
     void KVCache::slab_class_init()
     {
 
-        auto max_nr_slab_class = options_.slab_mem_budget / slab_size_;
-        nr_slab_class_ = std::min(20, max_nr_slab_class);
-        auto slab_class_size = default_slab_class_size(slab_size_, 8, nr_slab_class_);
+        nr_slab_class_ = options_.nr_slab_class;
         slab_class_table_ = new SlabClass[nr_slab_class_];
-        for (size_t i = 0; i < nr_slab_class_; i++)
+        for (int i = 0; i < nr_slab_class_; i++)
         {
             slab_class_table_[i].cid = i;
-            slab_class_table_[i].slot_size = slab_class_size[i];
-            slab_class_table_[i].nr_mslab = 0;
-            slab_class_table_[i].nr_dslab = 0;
+            slab_class_table_[i].slot_size = options_.slab_class_size[i];
+            slab_class_table_[i].slots_per_slab = ssd_->block_size_ / slab_class_table_[i].slot_size;
             INIT_LIST_HEAD(&slab_class_table_[i].slab_partial);
+            const int items = (slab_size_ - Slab::header_size()) / slab_class_table_[i].slot_size;
+            const int slot_size = slab_class_table_[i].slot_size;
+            const int kv_size = slot_size - Slot::header_size();
         }
     }
 
     void KVCache::index_init()
     {
-        auto nr_index_entry = std::max(options_.index_mem_budget / sizeof(IndexEntry), static_cast<size_t>(options_.slab_mem_budget / slab_class_table_[0].slot_size));
+        auto nr_index_entry = options_.index_mem_budget / sizeof(IndexEntry);
+        auto min_nr_index_entry = std::accumulate(slab_class_table_, slab_class_table_ + nr_slab_class_, 0, [](int sum, const SlabClass &sc) { return sum + sc.slots_per_slab; });
+        // If free index_entrys are exhausted and all mdslabs are not full,
+        // GC can not reclaim index_entrys. Thus, index_mem_budget must be
+        // big enough to hold index_entrys for nr_slab_class_ mdslabs.
+        if (nr_index_entry < min_nr_index_entry)
+        {
+            auto min_index_mem_budget = min_nr_index_entry * sizeof(IndexEntry);
+            throw std::invalid_argument(std::format("index_mem_budget {} is too small, min_index_mem_budget {} bytes", options_.index_mem_budget, min_index_mem_budget));
+        }
         index_area_base_ = (IndexEntry *)mmap(nullptr, nr_index_entry * sizeof(IndexEntry), PROT_READ | PROT_WRITE,
                                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (index_area_base_ == MAP_FAILED)
@@ -127,12 +137,31 @@ namespace KVCache
             INIT_LIST_HEAD(&index_area_base_[i].list);
             list_add(&index_area_base_[i].list, &free_index_entry_);
         }
+        nr_free_index_entry_ = nr_index_entry;
+
         index_table_size_ = options_.index_table_size;
         index_table_ = new struct list_head[index_table_size_];
         for (size_t i = 0; i < index_table_size_; i++)
         {
             INIT_LIST_HEAD(&index_table_[i]);
         }
+    }
+
+    KVCache::Options KVCache::DefaultOptions(SSD *ssd)
+    {
+        Options options;
+        options.slab_mem_budget = 1 * GB;
+        options.index_mem_budget = 100 * MB;
+        options.index_table_size = 512 * KB;
+        options.enable_background_flush = true;
+        options.enable_background_gc = true;
+        options.ops_rate = 0.2;
+        options.free_block_slab_water_mark_low_min = 0.02;
+        options.free_block_slab_water_mark_high_max = 0.90;
+        options.free_block_water_mark_low = 0.07;
+        options.free_block_water_mark_high = 0.80;
+        default_slab_class_size(ssd->block_size_, 32, options.slab_class_size, kMaxNumSlabClass, &options.nr_slab_class);
+        return options;
     }
 
     KVCache::KVCache(SSD *ssd, const Options &options)
@@ -150,7 +179,7 @@ namespace KVCache
 
     Status KVCache::Get(std::string_view key, std::string *value)
     {
-        std::shared_lock<std::shared_mutex> reader_lock(reader_mutex_);
+        std::shared_lock<std::shared_mutex> reader_lock(index_mutex_);
         auto index_entry = get_index_entry(key);
         if (!index_entry)
         {
@@ -200,7 +229,7 @@ namespace KVCache
             // Update index entry
             auto slab = slot_to_slab(slot);
             {
-                std::unique_lock<std::shared_mutex> reader_lock(reader_mutex_);
+                std::unique_lock<std::shared_mutex> reader_lock(index_mutex_);
                 auto index_entry = get_index_entry(key);
                 if (index_entry)
                 {
@@ -216,7 +245,19 @@ namespace KVCache
                 }
                 else
                 {
-                    index_entry = index_entry_alloc(key);
+                    IndexEntry *index_entry = nullptr;
+                    while (!(index_entry = index_entry_alloc(key)))
+                    {
+                        // Flush full mslabs and GC to release index entries.
+
+                        slab_flush();
+                        slab_gc();
+                        gc_finished_signal_.wait(reader_lock, [this] {
+                            return nr_free_index_entry_ > 0;
+                        });
+                    }
+                    auto digest = make_digest(key);
+                    index_entry->digest = digest;
                     index_entry->slab_id = slab->sid;
                     index_entry->slot_id = slot_id(slot);
                     {
@@ -310,13 +351,20 @@ namespace KVCache
 
     IndexEntry *KVCache::index_entry_alloc(std::string_view key)
     {
-        // KVCache::KVCache() make sure index entry mmap area is big enough.
-        // TODO: consider the case that index entry mmap area is not big enough.
-        assert(!list_empty(&free_index_entry_));
-        auto index_entry = list_first_entry(&free_index_entry_, IndexEntry, list);
+        if (list_empty(&free_index_entry_))
+        {
+            return nullptr;
+        }
+        auto nr_free_index_entry = 0;
+        IndexEntry *index_entry = nullptr;
+        list_for_each_with_entry(IndexEntry, index_entry, &free_index_entry_, list)
+        {
+            nr_free_index_entry++;
+        }
+        assert(nr_free_index_entry >= 0 && nr_free_index_entry == nr_free_index_entry_);
+        index_entry = list_first_entry(&free_index_entry_, IndexEntry, list);
         list_del(&index_entry->list);
-        auto digest = make_digest(key);
-        index_entry->digest = digest;
+        nr_free_index_entry_--;
         return index_entry;
     }
 
@@ -380,15 +428,9 @@ namespace KVCache
         // assert(list_empty(&mslab_free_.list_));
         // assert(!list_empty(&mslab_full_.list_));
         slab_flush();
-        if (options_.enable_background_flush)
+        if (!wait_slab_flush_until_shutdown())
         {
-            std::unique_lock<std::mutex> mslab_free_lock(mslab_free_mutex_);
-            flush_finished_signal_.wait(mslab_free_lock, [this]()
-                                        { return !list_empty(&mslab_free_.list_) || shutdown_; });
-            if (shutdown_)
-            {
-                return Status::Shutdown("KVCache is shutting down");
-            }
+            return Status::Shutdown("KVCache is shutting down");
         }
         return slot_alloc(size, slotp);
     }
@@ -438,6 +480,18 @@ namespace KVCache
         {
             do_slab_flush();
         }
+    }
+
+    bool KVCache::wait_slab_flush_until_shutdown()
+    {
+        if (options_.enable_background_flush)
+        {
+            std::unique_lock<std::mutex> mslab_free_lock(mslab_free_mutex_);
+            flush_finished_signal_.wait(mslab_free_lock, [this]()
+                                        { return !list_empty(&mslab_free_.list_) || shutdown_; });
+            return !shutdown_;
+        }
+        return true;
     }
 
     bool KVCache::do_slab_flush()
@@ -491,20 +545,10 @@ namespace KVCache
 
             // Wait for GC to reclaim some dslab
             assert(!dslab);
-            if (options_.enable_background_gc)
+            slab_gc();
+            if (!wait_slab_gc_until_shutdown())
             {
-                slab_gc();
-                std::unique_lock<std::mutex> dslab_free_lock(dslab_free_mutex_);
-                gc_finished_signal_.wait(dslab_free_lock, [this]()
-                                         { return nr_free_dslab_ > 0 || shutdown_; });
-                if (shutdown_)
-                {
-                    return false;
-                }
-            }
-            else
-            {
-                slab_gc();
+                return false;
             }
         }
 
@@ -517,7 +561,7 @@ namespace KVCache
 
         // Update index table
         {
-            std::unique_lock<std::shared_mutex> reader_lock(reader_mutex_);
+            std::unique_lock<std::shared_mutex> reader_lock(index_mutex_);
             modify_index_to(mslab, dslab);
         }
 
@@ -533,6 +577,7 @@ namespace KVCache
             std::unique_lock<std::mutex> dslab_full_lock(dslab_full_mutex_);
             list_add(&dslab->list, &dslab_full_[dslab_channel].list_);
             dslab_full_[dslab_channel].size_++;
+            nr_full_dslab_++;
         }
 
         flush_finished_signal_.notify_one();
@@ -560,7 +605,7 @@ namespace KVCache
                             break;
                         }
                     } });
-                // flush thread signals gc thread to start
+                gc_signal_.notify_one();
             }
         }
         else
@@ -569,15 +614,51 @@ namespace KVCache
         }
     }
 
-    // TODO: implement slab gc
+    bool KVCache::wait_slab_gc_until_shutdown()
+    {
+        if (options_.enable_background_gc)
+        {
+            std::unique_lock<std::mutex> dslab_free_lock(dslab_free_mutex_);
+            gc_finished_signal_.wait(dslab_free_lock, [this]()
+                                     { return nr_free_dslab_ > 0 || shutdown_; });
+            return !shutdown_;
+        }
+        return true;
+    }
+
     bool KVCache::do_slab_gc()
     {
+        {
+            std::unique_lock<std::mutex> dslab_full_lock(dslab_full_mutex_);
+            gc_signal_.wait(dslab_full_lock, [this]()
+                               { return nr_full_dslab_ > 0 || shutdown_; });
+            if (shutdown_)
+            {
+                return false;
+            }
+        }
+
         dslab_free_mutex_.lock();
         auto nr_free_dslab = nr_free_dslab_;
         dslab_free_mutex_.unlock();
         assert(nr_free_dslab >= 0);
-        auto run_next_round = (nr_free_dslab < free_block_water_mark_low_) ? quick_gc() : normal_gc();
-        gc_finished_signal_.notify_one();
+
+        auto run_next_round = false;
+        if (!nr_free_index_entry_)
+        {
+            // Drop one full dslab to release index entries.
+            run_next_round = do_quick_gc(1, 0);
+        }
+        else if (nr_free_dslab < free_block_water_mark_low_)
+        {
+            run_next_round = quick_gc();
+        }
+        else
+        {
+            run_next_round = normal_gc();
+        }
+
+        gc_finished_signal_.notify_all();
         return run_next_round;
     }
 
@@ -602,51 +683,14 @@ namespace KVCache
         dslab->nr_used.store(mslab->nr_used.load());
     }
 
-    // 1. Drop full dslab directly to respond high disk space pressure immediately.
-    // 2. Increase ops_pool_size to speedup normal GC.
-    // 3. Increase high/low water maker.
-    bool KVCache::quick_gc()
+    // Drop full dslab directly to release disk space and index entries.
+    bool KVCache::do_quick_gc(int nr_back_to_free_dslab, int nr_back_to_ops_pool)
     {
-        {
-            std::unique_lock<std::mutex> dslab_full_lock(dslab_full_mutex_);
-            flush_signal_.wait(dslab_full_lock, [this]()
-                               { return !list_empty(&mslab_full_.list_) || shutdown_; });
-            if (shutdown_)
-            {
-                return false;
-            }
-        }
-
-        dslab_free_mutex_.lock();
-        int nr_free_dslab = nr_free_dslab_;
-        dslab_free_mutex_.unlock();
-        assert(nr_free_dslab > -1);
         assert(ops_pool_size_ > 0 && ops_pool_size_ <= max_ops_pool_size_);
         assert(check_ops_pool());
-        // Low water mark means the system is under high disk space pressure.
-        // In this case, we need to drop some full dslab to free up disk space immediately
-        // and ops_pool_size to speedup normal GC.
-        int old_free_block_water_mark_low = free_block_water_mark_low_;
-        int old_free_block_water_mark_high = free_block_water_mark_high_;
-
-        // water mark determines the number of dslabs to free and GC methods.
-        // We increase the high water mark to 1.5x for quick response.
-        free_block_water_mark_high_ = std::min(static_cast<int>(1.5 * free_block_water_mark_high_), free_block_water_mark_high_max_);
-        free_block_water_mark_low_ = std::min(static_cast<int>(1.5 * free_block_water_mark_low_), static_cast<int>(0.9 * free_block_water_mark_high_));
-        free_block_water_mark_low_ = std::min(free_block_water_mark_low_, max_ops_pool_size_);
-
-        // Double ops_pool_size_ to speedup normal GC.
-        //
-        // Free dslabs to free_block_water_mark_low_ 
-        // plus 0.3x extra dslab to give the system more
-        // chance to reach [low_water_mark, high_water_mark]
-        // and use normal GC to reclaim dslabs.
-        int nr_back_to_ops_pool = std::min(ops_pool_size_, max_ops_pool_size_ - ops_pool_size_);
-        int nr_back_to_free_dslab = free_block_water_mark_low_ - nr_free_dslab;
-        nr_back_to_free_dslab += 0.3 * free_block_water_mark_low_;
-        int nr_dslab_to_drop = nr_back_to_free_dslab + nr_back_to_ops_pool;
 
         // Select dslabs to drop
+        int nr_dslab_to_drop = nr_back_to_free_dslab + nr_back_to_ops_pool;
         struct list_head to_drop;
         INIT_LIST_HEAD(&to_drop);
         {
@@ -660,6 +704,7 @@ namespace KVCache
                     auto dslab = list_first_entry(&dslab_full_[channel].list_, Slab, list);
                     list_del(&dslab->list);
                     dslab_full_[channel].size_--;
+                    nr_full_dslab_--;
                     list_add(&dslab->list, &to_drop);
                     nr_dslab_to_drop--;
                 }
@@ -676,7 +721,7 @@ namespace KVCache
         {
             auto fake_slab = read_dslab(dslab, &read_buffer);
             assert(fake_slab->sid == dslab->sid);
-            std::unique_lock<std::shared_mutex> reader_lock(reader_mutex_);
+            std::unique_lock<std::shared_mutex> reader_lock(index_mutex_);
             evict_dslab(fake_slab, &read_buffer);
             dslab->nr_used.store(0);
         }
@@ -717,6 +762,44 @@ namespace KVCache
         return true;
     }
 
+    // 1. Drop full dslab directly to respond high disk space pressure immediately.
+    // 2. Increase ops_pool_size to speedup normal GC.
+    // 3. Increase high/low water maker.
+    bool KVCache::quick_gc()
+    {
+
+        dslab_free_mutex_.lock();
+        int nr_free_dslab = nr_free_dslab_;
+        dslab_free_mutex_.unlock();
+        assert(nr_free_dslab > -1);
+        assert(ops_pool_size_ > 0 && ops_pool_size_ <= max_ops_pool_size_);
+        assert(check_ops_pool());
+        // Low water mark means the system is under high disk space pressure.
+        // In this case, we need to drop some full dslab to free up disk space immediately
+        // and ops_pool_size to speedup normal GC.
+        int old_free_block_water_mark_low = free_block_water_mark_low_;
+        int old_free_block_water_mark_high = free_block_water_mark_high_;
+
+        // water mark determines the number of dslabs to free and GC methods.
+        // We increase the high water mark to 1.5x for quick response.
+        free_block_water_mark_high_ = std::min(static_cast<int>(1.5 * free_block_water_mark_high_), free_block_water_mark_high_max_);
+        free_block_water_mark_low_ = std::min(static_cast<int>(1.5 * free_block_water_mark_low_), static_cast<int>(0.9 * free_block_water_mark_high_));
+        free_block_water_mark_low_ = std::min(free_block_water_mark_low_, max_ops_pool_size_);
+
+        // Double ops_pool_size_ to speedup normal GC.
+        //
+        // Free dslabs to free_block_water_mark_low_
+        // plus 0.3x extra dslab to give the system more
+        // chance to reach [low_water_mark, high_water_mark]
+        // and use normal GC to reclaim dslabs.
+        int nr_back_to_ops_pool = std::min(ops_pool_size_, max_ops_pool_size_ - ops_pool_size_);
+        int nr_back_to_free_dslab = free_block_water_mark_low_ - nr_free_dslab;
+        nr_back_to_free_dslab += 0.3 * free_block_water_mark_low_;
+        int nr_dslab_to_drop = nr_back_to_free_dslab + nr_back_to_ops_pool;
+
+        return do_quick_gc(nr_back_to_free_dslab, nr_back_to_ops_pool);
+    }
+
     void KVCache::evict_dslab(Slab *dslab, std::string *read_buffer)
     {
         auto fake_slab = read_dslab(dslab, read_buffer);
@@ -742,6 +825,7 @@ namespace KVCache
     void KVCache::index_entry_free(IndexEntry *entry)
     {
         list_add(&entry->list, &free_index_entry_);
+        nr_free_index_entry_++;
     }
 
     // read_dslab return a fake mslab that can be used to read slots of dslab
@@ -760,15 +844,6 @@ namespace KVCache
     // GC full dslabs with largest number of used slots until ops_pool_ is full
     bool KVCache::normal_gc()
     {
-        {
-            std::unique_lock<std::mutex> dslab_full_lock(dslab_full_mutex_);
-            flush_signal_.wait(dslab_full_lock, [this]()
-                               { return !list_empty(&mslab_full_.list_) || shutdown_; });
-            if (shutdown_)
-            {
-                return false;
-            }
-        }
         std::priority_queue<Slab *, std::vector<Slab *>, SlabGCPriorityComparator> pq;
         for (int channel = 0; channel < ssd_->nr_channels_; channel++)
         {
@@ -989,6 +1064,8 @@ namespace KVCache
             for (auto dslab : to_drop)
             {
                 list_del(&dslab->list);
+                dslab_full_[ssd_->channel_id(dslab->block_id)].size_--;
+                nr_full_dslab_--;
                 auto channel = ssd_->channel_id(dslab->block_id);
                 list_add(&dslab->list, &free_list[channel].list_);
                 free_list[channel].size_++;
@@ -1009,7 +1086,7 @@ namespace KVCache
             assert(dslab->cid != -1);
             assert(dslab->cid == gc_buffer_->cid);
             auto fake_slab = read_dslab(dslab, read_buffer);
-            std::unique_lock<std::shared_mutex> reader_lock(reader_mutex_);
+            std::unique_lock<std::shared_mutex> reader_lock(index_mutex_);
             fake_slab->for_each_slot([this, dslab](Slot *slot, int slot_id)
                                      {
                 auto index_entry = get_index_entry(slot->key());
@@ -1030,7 +1107,7 @@ namespace KVCache
         assert(gc_buffer_->cid != -1);
         flush_mslab_to_dslab(gc_buffer_, ops_slab);
         {
-            std::unique_lock<std::shared_mutex> reader_lock(reader_mutex_);
+            std::unique_lock<std::shared_mutex> reader_lock(index_mutex_);
             modify_index_to(gc_buffer_, ops_slab);
         }
     }
@@ -1057,7 +1134,7 @@ namespace KVCache
 
     void KVCache::Delete(std::string_view key)
     {
-        std::unique_lock<std::shared_mutex> reader_lock(reader_mutex_);
+        std::unique_lock<std::shared_mutex> reader_lock(index_mutex_);
         auto index_entry = get_index_entry(key);
         if (!index_entry)
         {
@@ -1079,26 +1156,33 @@ namespace KVCache
         flush_signal_.notify_all();
         gc_finished_signal_.notify_all();
         flush_finished_signal_.notify_all();
-        if (slab_flush_thread_.joinable()) {
+        if (slab_flush_thread_.joinable())
+        {
             slab_flush_thread_.join();
         }
-        if (slab_gc_thread_.joinable()) {
+        if (slab_gc_thread_.joinable())
+        {
             slab_gc_thread_.join();
         }
     }
 
-    // Calculate the default slab class size [min_value_size, max_value_size]
-    std::vector<int> KVCache::default_slab_class_size(int slab_size, int min_value_size, int nr_slab_class)
+    // Calculate the default slab class size [min_kv_size, slab_size - Slab::header_size()]
+    void KVCache::default_slab_class_size(int slab_size, int min_kv_size, int slab_class_size[], int max_nr_slab_class, int *nr_slab_class_out)
     {
-        int max_value_size = slab_size - Slab::header_size();
+        int max_slot_size = slab_size - Slab::header_size();
+        int min_slot_size = min_kv_size + Slot::header_size();
         double factor = 2;
-        std::vector<int> slab_class_size(nr_slab_class);
-        int curr_size = max_value_size;
-        for (int i = nr_slab_class - 1; i >= 0; i--)
+        int curr_size = min_slot_size;
+        int i = 0;
+        for (i = 0; i < max_nr_slab_class; i++)
         {
-            curr_size = std::max(static_cast<int>(curr_size / factor), min_value_size);
             slab_class_size[i] = curr_size;
+            curr_size = std::min(static_cast<int>(curr_size * factor), max_slot_size);
+            if (i > 1 && slab_class_size[i - 1] >= max_slot_size)
+            {
+                break;
+            }
         }
-        return slab_class_size;
+        *nr_slab_class_out = i;
     }
 }

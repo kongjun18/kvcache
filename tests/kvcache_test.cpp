@@ -16,7 +16,7 @@ protected:
     std::unique_ptr<KVCache::KVCache> cache_;
 
     size_t random_data_size() {
-        return 8 + (std::rand() % (cache_->max_kv_size() - 8 + 1));
+        return 8 + (std::rand() % (cache_->MaxKVSize() - 8 + 1));
     }
 
     // I want to keep using my laptop for a few more years,
@@ -40,7 +40,7 @@ protected:
         std::srand(42);
     }
     void SetUp() override {
-        KVCache::Options options;
+        auto options = KVCache::KVCache::DefaultOptions(ssd_);
         options.slab_mem_budget = 10 * 1024 * 1024; // 10MiB
         options.index_mem_budget = 1 * 1024 * 1024; // 1MiB
         options.index_table_size = 512 * 1024; // 512KiB hash bucket
@@ -120,8 +120,8 @@ TEST_F(KVCacheTest, TestQuickGC) {
         size += value_size;
         if (status.is_object_too_large()) {
             auto size = keys[i].size() + value_size;
-            ASSERT_TRUE(size > cache_->max_kv_size())
-                << "size: " << size << " max_kv_size: " << cache_->max_kv_size();
+            ASSERT_TRUE(size > cache_->MaxKVSize())
+                << "size: " << size << " max_kv_size: " << cache_->MaxKVSize();
             continue;
         }
         ASSERT_TRUE(status.ok()) << status.msg();
@@ -156,7 +156,7 @@ TEST_F(KVCacheTest, TestNormalGC) {
     const uint64_t total_size = 2 * ssd_->nr_blocks_ * ssd_->block_size_;
     size_t size = 0;
     std::unordered_map<std::string, int> key_2_size;
-    auto max_value_size = cache_->max_kv_size();
+    auto max_value_size = cache_->MaxKVSize();
     auto fixed_random_size = [this, max_value_size]() {
         static auto sizes = std::vector<int>{max_value_size/4, max_value_size/8, max_value_size/16, max_value_size/32};
         return sizes[std::rand() % sizes.size()];
@@ -173,8 +173,8 @@ TEST_F(KVCacheTest, TestNormalGC) {
         size += value_size;
         if (status.is_object_too_large()) {
             auto kv_size = key.size() + value_size;
-            ASSERT_TRUE(kv_size > cache_->max_kv_size())
-                << "size: " << kv_size << " max_kv_size: " << cache_->max_kv_size();
+            ASSERT_TRUE(kv_size > cache_->MaxKVSize())
+                << "size: " << kv_size << " max_kv_size: " << cache_->MaxKVSize();
             continue;
         }
         ASSERT_TRUE(status.ok()) << status.msg();
@@ -239,12 +239,12 @@ TEST_F(KVCacheTest, TestEdgeCases) {
     ASSERT_TRUE(status.ok()) << status.msg();
 
     // Large value
-    std::string large_value(cache_->max_kv_size()/2, 'x');
+    std::string large_value(cache_->MaxKVSize()/2, 'x');
     status = cache_->Put("large_key", large_value);
     ASSERT_TRUE(status.ok()) << status.msg();
 
     // Too large value
-    std::string too_large_value(2*cache_->max_kv_size(), 'x');
+    std::string too_large_value(2*cache_->MaxKVSize(), 'x');
     status = cache_->Put("too_large_key", too_large_value);
     ASSERT_TRUE(status.is_object_too_large()) << status.msg();
 
@@ -273,7 +273,7 @@ TEST_F(KVCacheTest, BenchmarkPutAndGet4SSDWithRandomKeyAndValue) {
     size_t write_ops = 0;
 
     // write performance test
-    std::string write_buffer(cache_->max_kv_size(), 'x');
+    std::string write_buffer(cache_->MaxKVSize(), 'x');
     auto write_start = std::chrono::high_resolution_clock::now();
     for (int size = 0; actual_write_bytes < total_size; ) {
         int key_id = std::rand() % max_keys;

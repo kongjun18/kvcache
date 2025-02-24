@@ -33,13 +33,6 @@ static inline void list_add(struct list_head *newh, struct list_head *head) {
   head->next = newh;
 }
 
-static inline void list_add_tail(struct list_head *newh,
-                                 struct list_head *head) {
-  newh->prev = head->prev;
-  newh->next = head;
-  head->prev->next = newh;
-  head->prev = newh;
-}
 
 static inline void list_del(struct list_head *entry) {
   entry->prev->next = entry->next;

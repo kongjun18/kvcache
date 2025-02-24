@@ -4,7 +4,6 @@
 #include "status.h"
 #include "ssd.h"
 #include "list.h"
-#include "options.h"
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -19,6 +18,10 @@
 namespace KVCache
 {
     static constexpr int kDigestLength = 20;
+    static constexpr int kMaxNumSlabClass = 50;
+    static constexpr int KB = 1024;
+    static constexpr int MB = 1024 * 1024;
+    static constexpr int GB = 1024 * MB;
 
     struct Slot
     {
@@ -29,7 +32,7 @@ namespace KVCache
         };
         Header header;
         char data[0];
-        static constexpr size_t header_size() { return offsetof(Slot, data); }        
+        static constexpr size_t header_size() { return offsetof(Slot, data); }
         void Write(std::string_view key, std::string_view value)
         {
             header.key_len = key.size();
@@ -46,27 +49,12 @@ namespace KVCache
             return std::string_view(data + header.key_len, header.value_len);
         }
     };
-    struct SlabInfo
-    {
-        int sid;
-        int cid; // slab class id
-        int nr_alloc;
-        int nr_slots;
-        int slot_used;
-        bool in_memory;
-        // memory: index of the slab in mslab(memory slab) mmap area.
-        // disk: (BlockID << 5) || ChannelID
-        int addr;
-
-        struct list_head list;
-    };
 
     struct SlabClass
     {
         int cid;
         int slot_size;
-        int nr_mslab;
-        int nr_dslab;
+        int slots_per_slab;
         // slab_partial doesn't need to be protected by mutex,
         // because it's only accessed by the writer thread.
         struct list_head slab_partial;
@@ -157,7 +145,6 @@ namespace KVCache
 
     // sha1 digest
     using Digest = std::array<unsigned char, kDigestLength>;
-    // TODO: change slab_id to Slab*
     struct IndexEntry
     {
         Digest digest;
@@ -169,15 +156,45 @@ namespace KVCache
     class KVCache
     {
     public:
-        KVCache(SSD *ssd, const Options &options = Options::DefaultOptions());
+        struct Options
+        {
+            // The maximum memory used for slabs
+            int slab_mem_budget;
+            // The maximum memory used for index
+            int index_mem_budget;
+            // The number of buckets in index hash table
+            int index_table_size;
+            // The ratio of OPS(Over-Provisioned Space) blocks to total blocks
+            float ops_rate;
+            // When the number of free blocks hits free_block_water_mark_low, reduce ops_pool size and put ops blocks into free blocks
+            float free_block_water_mark_low;
+            // When the number of free blocks hits free_block_water_mark_high, increase ops_pool size and put free blocks back into ops_pool
+            float free_block_water_mark_high;
+            // The minimum ratio of free blocks to total blocks
+            float free_block_slab_water_mark_low_min;
+            // The maximum ratio of free blocks to total blocks
+            float free_block_slab_water_mark_high_max;
+            // Whether to enable background flush
+            bool enable_background_flush;
+            // Whether to enable background gc
+            bool enable_background_gc;
+            // The size of each slab class
+            int slab_class_size[kMaxNumSlabClass];
+            // The number of slab classes
+            int nr_slab_class;
+        };
+
+    public:
+        static Options DefaultOptions(SSD *ssd);
+
+        KVCache(SSD *ssd) : KVCache(ssd, DefaultOptions(ssd)) {}
+        KVCache(SSD *ssd, const Options &options);
         ~KVCache();
 
         Status Get(std::string_view key, std::string *value);
         Status Put(std::string_view key, std::string_view value);
         void Delete(std::string_view key);
-        int max_kv_size() const {return slab_class_table_[nr_slab_class_ - 1].slot_size - Slot::header_size();}
-
-        static std::vector<int> default_slab_class_size(int slab_size, int min_value_size, int nr_slab_class);
+        int MaxKVSize() const { return slab_class_table_[nr_slab_class_ - 1].slot_size - Slot::header_size(); }
 
     private:
         // GC priority: the slab with smaller valid objects has higher priority
@@ -214,6 +231,7 @@ namespace KVCache
         int max_ops_pool_size_ = 0;
         int ops_pool_size_ = 0;
         int nr_free_dslab_ GUARDED_BY(dslab_free_mutex_) = 0;
+        int nr_full_dslab_ = 0;
 
         SlabClass *slab_class_table_;
         int nr_slab_class_ = 0;
@@ -232,19 +250,19 @@ namespace KVCache
         struct list_head *index_table_ GUARDED_BY(index_mutex_);
         int index_table_size_ = 0;
         struct list_head free_index_entry_ GUARDED_BY(index_mutex_);
-        std::mutex index_mutex_;
+        std::atomic_int nr_free_index_entry_;
 
         std::mutex writer_mutex_;
-        // All writes on index and slab it points to should be protected by reader_mutex_,
+        // All writes on index and slab it points to should be protected by index_mutex_,
         // except for Slab::nr_used and Slab::nr_alloc.
-        std::shared_mutex reader_mutex_;
+        std::shared_mutex index_mutex_;
 
         std::condition_variable flush_signal_;
         std::condition_variable flush_finished_signal_;
         std::thread slab_flush_thread_;
         std::atomic_flag slab_flush_thread_started_;
         std::condition_variable gc_signal_;
-        std::condition_variable gc_finished_signal_;
+        std::condition_variable_any gc_finished_signal_;
         std::thread slab_gc_thread_;
         std::atomic_flag slab_gc_thread_started_;
         std::mutex gc_mutex_;
@@ -260,10 +278,12 @@ namespace KVCache
 
         // Shutndown
         std::atomic_bool shutdown_;
+
     private:
         void slab_init();
         void index_init();
         void slab_class_init();
+        static void default_slab_class_size(int slab_size, int min_value_size, int slab_class_size[], int max_nr_slab_class, int *nr_slab_class_out);
 
         IndexEntry *index_entry_alloc(std::string_view key);
         void index_entry_free(IndexEntry *entry);
@@ -282,19 +302,15 @@ namespace KVCache
         bool in_memory(int sid);
 
         void slab_flush();
+        bool wait_slab_flush_until_shutdown();
         bool do_slab_flush();
-        void slab_gc() EXCLUDES(gc_mutex_);
-        bool do_slab_gc() EXCLUDES(gc_mutex_);
+        void slab_gc();
+        bool wait_slab_gc_until_shutdown();
+        bool do_slab_gc();
         int next_channel(int current_channel);
         void flush_mslab_to_dslab(Slab *mslab, Slab *dslab);
-
-        // Self-tuning feedback-based OPS management algorithm
-        // 1. If the number of ops blocks is less than free_block_water_mark_low_,
-        //    move some ops blocks to dslab_free_.
-        // 2. If the number of ops blocks is greater than free_block_water_mark_high_,
-        //    start GC to reclaim some full dslab back to ops_pool_.
-        void tune_ops_pool_size() EXCLUDES(gc_mutex_);
         bool quick_gc();
+        bool do_quick_gc(int nr_back_to_free_dslab, int nr_back_to_ops_pool);
         bool normal_gc();
         // Delete all index entries of the dslab
         void evict_dslab(Slab *dslab, std::string *read_buffer);
@@ -305,7 +321,6 @@ namespace KVCache
         // modify_index_to modifies index entries in src to dst
         void modify_index_to(Slab *src, Slab *dst);
         bool check_ops_pool();
-
     };
 } // namespace KVCache
 #endif
