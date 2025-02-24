@@ -9,7 +9,7 @@ bool Status::ok() const {
     return code_ == kOK;
 }   
 
-bool Status::is_shutdown() const {
+bool Status::shutdown() const {
     return code_ == kShutdown;
 }
 
@@ -17,12 +17,16 @@ Code Status::code() const {
     return code_;
 }
 
-bool Status::is_not_found() const {
+bool Status::not_found() const {
     return code_ == kNotFound;
 }
 
-bool Status::is_object_too_large() const {
+bool Status::object_too_large() const {
     return code_ == kObjectTooLarge;
+}
+
+bool Status::buffer_too_small() const {
+    return code_ == kBufferTooSmall;
 }
 
 std::string Status::msg() const {
@@ -47,6 +51,10 @@ Status Status::Corruption(const std::string& msg) {
 
 Status Status::ObjectTooLarge(const std::string& msg) {
     return Status(kObjectTooLarge, msg);
+}
+
+Status Status::BufferTooSmall(const std::string& msg) {
+    return Status(kBufferTooSmall, msg);
 }
 
 }

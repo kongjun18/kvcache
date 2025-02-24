@@ -9,6 +9,7 @@ enum Code {
     kNotFound,
     kCorruption,
     kObjectTooLarge,
+    kBufferTooSmall,
     kShutdown,
 };
 
@@ -19,9 +20,10 @@ public:
     ~Status()= default;
 
     bool ok() const;
-    bool is_not_found() const;
-    bool is_object_too_large() const;
-    bool is_shutdown() const;
+    bool not_found() const;
+    bool object_too_large() const;
+    bool shutdown() const;
+    bool buffer_too_small() const;
     Code code() const;
     std::string msg() const;
 
@@ -30,6 +32,7 @@ public:
     static Status Corruption(const std::string& msg = std::string());
     static Status ObjectTooLarge(const std::string& msg = std::string());
     static Status Shutdown(const std::string& msg = std::string());
+    static Status BufferTooSmall(const std::string& msg = std::string());
 private:
     Code code_;
     std::string msg_;

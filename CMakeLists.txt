@@ -43,11 +43,13 @@ endif()
 message(STATUS "Found RocksDB: ${ROCKSDB_LIBRARY}")
 message(STATUS "RocksDB include: ${ROCKSDB_INCLUDE_DIR}")
 
-add_library(${PROJECT_NAME} STATIC
+add_library(${PROJECT_NAME} STATIC SHARED
     src/kvcache.cpp
     src/status.cpp
     src/ssd.cpp
+    src/kvcache_c_api.cpp
 )
+
 
 target_include_directories(${PROJECT_NAME}
     PUBLIC
@@ -90,7 +92,7 @@ install(TARGETS ${PROJECT_NAME}
 )
 
 # Install header files
-install(FILES include/kvcache.h
+install(FILES include/kvcache.h include/kvcache_c_api.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 

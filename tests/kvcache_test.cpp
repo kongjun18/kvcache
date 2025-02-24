@@ -78,7 +78,7 @@ TEST_F(KVCacheTest, TestBasicOperations) {
         std::string key = std::format("test_key_{}", i);
         std::string value;
         status = cache_->Get(key, &value);
-        if (status.is_not_found()) {
+        if (status.not_found()) {
             continue;
         }
         ASSERT_TRUE(status.ok()) << status.msg();
@@ -96,7 +96,7 @@ TEST_F(KVCacheTest, TestBasicOperations) {
         std::string key = std::format("test_key_{}", i);
         std::string value;
         status = cache_->Get(key, &value);
-        ASSERT_TRUE(status.is_not_found()) << status.msg();
+        ASSERT_TRUE(status.not_found()) << status.msg();
     }
 }
 
@@ -118,7 +118,7 @@ TEST_F(KVCacheTest, TestQuickGC) {
 
         status = cache_->Put(key, std::string(value_size, 'v'));
         size += value_size;
-        if (status.is_object_too_large()) {
+        if (status.object_too_large()) {
             auto size = keys[i].size() + value_size;
             ASSERT_TRUE(size > cache_->MaxKVSize())
                 << "size: " << size << " max_kv_size: " << cache_->MaxKVSize();
@@ -131,7 +131,7 @@ TEST_F(KVCacheTest, TestQuickGC) {
         std::string value;
         status = cache_->Get(keys[i], &value);
         // Cache evicted or object too large
-        if (status.is_not_found()) {
+        if (status.not_found()) {
             continue;
         }
         ASSERT_TRUE(status.ok()) << status.msg();
@@ -146,7 +146,7 @@ TEST_F(KVCacheTest, TestQuickGC) {
     for (size_t i = 0; i < keys.size(); i++) {
         std::string value;
         status = cache_->Get(keys[i], &value);
-        ASSERT_TRUE(status.is_not_found()) << status.msg();
+        ASSERT_TRUE(status.not_found()) << status.msg();
     }
 }
 
@@ -158,7 +158,7 @@ TEST_F(KVCacheTest, TestNormalGC) {
     std::unordered_map<std::string, int> key_2_size;
     auto max_value_size = cache_->MaxKVSize();
     auto fixed_random_size = [this, max_value_size]() {
-        static auto sizes = std::vector<int>{max_value_size/4, max_value_size/8, max_value_size/16, max_value_size/32};
+        static auto sizes = std::vector{max_value_size/4, max_value_size/8, max_value_size/16, max_value_size/32};
         return sizes[std::rand() % sizes.size()];
     };
 
@@ -171,7 +171,7 @@ TEST_F(KVCacheTest, TestNormalGC) {
 
         status = cache_->Put(key, std::string(value_size, 'v'));
         size += value_size;
-        if (status.is_object_too_large()) {
+        if (status.object_too_large()) {
             auto kv_size = key.size() + value_size;
             ASSERT_TRUE(kv_size > cache_->MaxKVSize())
                 << "size: " << kv_size << " max_kv_size: " << cache_->MaxKVSize();
@@ -184,7 +184,7 @@ TEST_F(KVCacheTest, TestNormalGC) {
         std::string value;
         status = cache_->Get(key, &value);
         // Cache evicted or object too large
-        if (status.is_not_found()) {
+        if (status.not_found()) {
             continue;
         }
         ASSERT_TRUE(status.ok()) << status.msg();
@@ -198,7 +198,7 @@ TEST_F(KVCacheTest, TestNormalGC) {
     for (auto& [key, value_size] : key_2_size) {
         std::string value;
         status = cache_->Get(key, &value);
-        ASSERT_TRUE(status.is_not_found()) << status.msg();
+        ASSERT_TRUE(status.not_found()) << status.msg();
     }
 }
 
@@ -246,12 +246,12 @@ TEST_F(KVCacheTest, TestEdgeCases) {
     // Too large value
     std::string too_large_value(2*cache_->MaxKVSize(), 'x');
     status = cache_->Put("too_large_key", too_large_value);
-    ASSERT_TRUE(status.is_object_too_large()) << status.msg();
+    ASSERT_TRUE(status.object_too_large()) << status.msg();
 
     // Non-existent key
     std::string retrieved_value;
     status = cache_->Get("non_existent_key", &retrieved_value);
-    ASSERT_TRUE(status.is_not_found()) << status.msg();
+    ASSERT_TRUE(status.not_found()) << status.msg();
 
     // Delete non-existent key
     cache_->Delete("non_existent_key");
@@ -286,7 +286,7 @@ TEST_F(KVCacheTest, BenchmarkPutAndGet4SSDWithRandomKeyAndValue) {
         status = cache_->Put(key, std::string_view(write_buffer.data(), value_size));
         write_ops++;
         if (!status.ok()) {
-            ASSERT_TRUE(status.is_object_too_large()) << status.msg();
+            ASSERT_TRUE(status.object_too_large()) << status.msg();
             continue;
         }
         actual_write_bytes += value_size;
@@ -306,7 +306,7 @@ TEST_F(KVCacheTest, BenchmarkPutAndGet4SSDWithRandomKeyAndValue) {
             status = cache_->Get(key, &value);
             read_ops++;
             if (!status.ok()) {
-                ASSERT_TRUE(status.is_not_found()) << status.msg();
+                ASSERT_TRUE(status.not_found()) << status.msg();
                 continue;
             }
             actual_read_bytes += value.size();

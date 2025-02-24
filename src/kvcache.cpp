@@ -177,7 +177,7 @@ namespace KVCache
         index_init();
     }
 
-    Status KVCache::Get(std::string_view key, std::string *value)
+    Status KVCache::get_slice(std::string_view key, std::string *read_buffer, std::string_view *value)
     {
         std::shared_lock<std::shared_mutex> reader_lock(index_mutex_);
         auto index_entry = get_index_entry(key);
@@ -189,7 +189,6 @@ namespace KVCache
 
         auto slab = slab_by_sid(index_entry->slab_id);
         std::string_view k, v;
-        auto read_buffer = std::string();
         if (slab->im_memory())
         {
             assert(index_entry->slot_id < slab->nr_alloc);
@@ -199,7 +198,7 @@ namespace KVCache
         }
         else
         {
-            auto dslab = read_dslab(slab, &read_buffer);
+            auto dslab = read_dslab(slab, read_buffer);
             assert(dslab);
             auto slot = dslab->slot(index_entry->slot_id);
             k = slot->key();
@@ -210,6 +209,37 @@ namespace KVCache
             return Status::NotFound("Key not found");
         }
         *value = v;
+        return Status::OK();
+    }
+
+    Status KVCache::Get(std::string_view key, std::string *value)
+    {
+        std::string read_buffer;
+        std::string_view value_slice;
+        auto status = get_slice(key, &read_buffer, &value_slice);
+        if (!status.ok())
+        {
+            return status;
+        }
+        *value = value_slice;
+        return Status::OK();
+    }
+
+    Status KVCache::Get(std::string_view key, char buffer[], size_t buffer_len, size_t *value_len)
+    {
+        std::string read_buffer;
+        std::string_view value_slice;
+        auto status = get_slice(key, &read_buffer, &value_slice);
+        if (!status.ok())
+        {
+            return status;
+        }
+        if (value_slice.size() > buffer_len)
+        {
+            return Status::BufferTooSmall("Buffer is too small");
+        }
+        memcpy(buffer, value_slice.data(), value_slice.size());
+        *value_len = value_slice.size();
         return Status::OK();
     }
 
@@ -252,9 +282,8 @@ namespace KVCache
 
                         slab_flush();
                         slab_gc();
-                        gc_finished_signal_.wait(reader_lock, [this] {
-                            return nr_free_index_entry_ > 0;
-                        });
+                        gc_finished_signal_.wait(reader_lock, [this]
+                                                 { return nr_free_index_entry_ > 0; });
                     }
                     auto digest = make_digest(key);
                     index_entry->digest = digest;
@@ -631,7 +660,7 @@ namespace KVCache
         {
             std::unique_lock<std::mutex> dslab_full_lock(dslab_full_mutex_);
             gc_signal_.wait(dslab_full_lock, [this]()
-                               { return nr_full_dslab_ > 0 || shutdown_; });
+                            { return nr_full_dslab_ > 0 || shutdown_; });
             if (shutdown_)
             {
                 return false;

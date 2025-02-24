@@ -191,9 +191,10 @@ namespace KVCache
         ~KVCache();
 
         Status Get(std::string_view key, std::string *value);
+        Status Get(std::string_view key, char buffer[], size_t buffer_len, size_t *value_len); // For C API
         Status Put(std::string_view key, std::string_view value);
         void Delete(std::string_view key);
-        int MaxKVSize() const { return slab_class_table_[nr_slab_class_ - 1].slot_size - Slot::header_size(); }
+        size_t MaxKVSize() const { return slab_class_table_[nr_slab_class_ - 1].slot_size - Slot::header_size(); }
 
     private:
         // GC priority: the slab with smaller valid objects has higher priority
@@ -283,6 +284,8 @@ namespace KVCache
         void index_init();
         void slab_class_init();
         static void default_slab_class_size(int slab_size, int min_value_size, int slab_class_size[], int max_nr_slab_class, int *nr_slab_class_out);
+
+        Status get_slice(std::string_view key, std::string *read_buffer, std::string_view *value);
 
         IndexEntry *index_entry_alloc(std::string_view key);
         void index_entry_free(IndexEntry *entry);
