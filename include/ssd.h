@@ -1,6 +1,7 @@
 #ifndef SSD_H
 #define SSD_H
 
+#include <sys/mman.h>
 #include "rocksdb/db.h"
 #include <string>
 #include "status.h"
@@ -46,13 +47,17 @@ namespace KVCache
         rocksdb::DB *db_;
         rocksdb::Options options_;
 
+        bool is_dev_ = false;
+        off_t dstart_ = 0;
+        int fd_ = 0;
+
     public:
-        explicit SSD(const std::string &db_path) : SSD(db_path, default_rocksdb_options()) {}
-        SSD(const std::string &db_path, const rocksdb::Options &options);
+        explicit SSD(const std::string &path);
+        SSD(const std::string &path, const rocksdb::Options &options);
         SSD(const SSD &other) = delete;
         SSD &operator=(const SSD &other) = delete;
-        
-        static Status create(const std::string &db_path, SSD **ssd, const Config &config, const rocksdb::Options &rocksdb_options= default_rocksdb_options());
+
+        static Status create(const std::string &path, SSD **ssd, const Config &config, const rocksdb::Options &rocksdb_options = default_rocksdb_options());
 
         ~SSD();
         static rocksdb::Options default_rocksdb_options();
@@ -62,31 +67,48 @@ namespace KVCache
         template <typename F>
         void iterate_all_blocks(F &&func)
         {
-            rocksdb::ReadOptions read_options;
-            read_options.prefix_same_as_start = true;
-            read_options.total_order_seek = false;
-            auto it(db_->NewIterator(read_options));
-            for (it->Seek(kBlockPrefix); it->Valid(); it->Next()) 
+            if (is_dev_)
             {
-                // Check if key still has the prefix
-                if (!it->key().starts_with(kBlockPrefix)) {
-                    break;
-                }
-
-                // blocks/<channel-id>/<block-id>
-                std::string key = it->key().ToString();
-                size_t start = strlen("/blocks/");
-                size_t delimiter = key.find('/', start);
-                if (delimiter == std::string::npos)
+                int block_id = 0;
+                for (int channel = 0; channel < nr_channels_; channel++)
                 {
-                    continue;
+                    for (int blocks_per_channel = 0; blocks_per_channel < blocks_per_channel_; blocks_per_channel++, block_id++)
+                    {
+                        auto block = Block(*this, block_id);
+                        func(block);
+                    }
                 }
-                
-                std::string channel_id = key.substr(start, delimiter - start);
-                std::string block_id = key.substr(delimiter + 1);
-                int channel = std::stoi(channel_id);
-                auto block = Block(*this, std::stoi(block_id));
-                func(block);
+            }
+            else
+            {
+
+                rocksdb::ReadOptions read_options;
+                read_options.prefix_same_as_start = true;
+                read_options.total_order_seek = false;
+                auto it(db_->NewIterator(read_options));
+                for (it->Seek(kBlockPrefix); it->Valid(); it->Next())
+                {
+                    // Check if key still has the prefix
+                    if (!it->key().starts_with(kBlockPrefix))
+                    {
+                        break;
+                    }
+
+                    // blocks/<channel-id>/<block-id>
+                    std::string key = it->key().ToString();
+                    size_t start = strlen("/blocks/");
+                    size_t delimiter = key.find('/', start);
+                    if (delimiter == std::string::npos)
+                    {
+                        continue;
+                    }
+
+                    std::string channel_id = key.substr(start, delimiter - start);
+                    std::string block_id = key.substr(delimiter + 1);
+                    int channel = std::stoi(channel_id);
+                    auto block = Block(*this, std::stoi(block_id));
+                    func(block);
+                }
             }
         }
 
