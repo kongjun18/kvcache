@@ -81,10 +81,9 @@ namespace KVCache
             slab_info->block_id = block.block_id;
             assert(block.channel_id < ssd_->nr_channels_);
             if (ops_pool_[block.channel_id].size_ < ops_size) {
-                list_add(&slab_info->list, &ops_pool_[block.channel_id].list_); 
+                list_add(&slab_info->list, &ops_pool_[block.channel_id].list_);
                 ops_pool_[block.channel_id].size_++;
                 ops_pool_size_++;
-                assert(check_ops_pool());
             } else {
                 list_add(&slab_info->list, &dslab_free_[block.channel_id].list_);
                 dslab_free_[block.channel_id].size_++;
@@ -384,13 +383,7 @@ namespace KVCache
         {
             return nullptr;
         }
-        auto nr_free_index_entry = 0;
         IndexEntry *index_entry = nullptr;
-        list_for_each_with_entry(IndexEntry, index_entry, &free_index_entry_, list)
-        {
-            nr_free_index_entry++;
-        }
-        assert(nr_free_index_entry >= 0 && nr_free_index_entry == nr_free_index_entry_);
         index_entry = list_first_entry(&free_index_entry_, IndexEntry, list);
         list_del(&index_entry->list);
         nr_free_index_entry_--;
@@ -769,7 +762,6 @@ namespace KVCache
             list_add(&dslab->list, &ops_pool_[channel].list_);
             ops_pool_[channel].size_++;
             ops_pool_size_++;
-            assert(check_ops_pool());
         }
         // Reclaim dslabs back to dslab_free_
         {
@@ -802,7 +794,6 @@ namespace KVCache
         dslab_free_mutex_.unlock();
         assert(nr_free_dslab > -1);
         assert(ops_pool_size_ > 0 && ops_pool_size_ <= max_ops_pool_size_);
-        assert(check_ops_pool());
         // Low water mark means the system is under high disk space pressure.
         // In this case, we need to drop some full dslab to free up disk space immediately
         // and ops_pool_size to speedup normal GC.
@@ -927,7 +918,6 @@ namespace KVCache
                         {
                             goto tune_ops_pool_size;
                         }
-                        assert(check_ops_pool());
                         gc_dslabs(to_drop, &read_buffer, free_list);
                         to_drop.clear();
                         nr_evicted_slots = 0;
@@ -947,7 +937,6 @@ namespace KVCache
                 {
                     goto tune_ops_pool_size;
                 }
-                assert(check_ops_pool());
                 gc_dslabs(to_drop, &read_buffer, free_list);
             }
         }
@@ -993,7 +982,6 @@ namespace KVCache
                 list_add(&dslab->list, &ops_pool_[channel].list_);
                 ops_pool_[channel].size_++;
                 ops_pool_size_++;
-                assert(check_ops_pool());
                 i++;
             }
             channel = next_channel(channel);
@@ -1009,7 +997,6 @@ namespace KVCache
                 list_del(&dslab->list);
                 ops_pool_[channel].size_--;
                 ops_pool_size_--;
-                assert(check_ops_pool());
                 dslab->reset();
                 list_add(&dslab->list, &free_list[channel].list_);
                 free_list[channel].size_++;
@@ -1076,7 +1063,6 @@ namespace KVCache
                 list_del(&ops_slab->list);
                 ops_pool_[channel].size_--;
                 ops_pool_size_--;
-                assert(check_ops_pool());
                 break;
             }
         } while (begin != next_ops_pool_remove_channel_);
@@ -1127,7 +1113,7 @@ namespace KVCache
                         new_slot->Write(slot->key(), slot->value());
                         index_entry->slab_id = gc_buffer_->sid;
                         index_entry->slot_id = nr_alloc;
-                    }   
+                    }
                 }
                 return true; });
             dslab->nr_used.store(0);

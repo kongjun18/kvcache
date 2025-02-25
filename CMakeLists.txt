@@ -50,6 +50,9 @@ add_library(${PROJECT_NAME} STATIC SHARED
     src/kvcache_c_api.cpp
 )
 
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NDEBUG)
+endif()
 
 target_include_directories(${PROJECT_NAME}
     PUBLIC
