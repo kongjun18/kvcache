@@ -173,9 +173,13 @@ namespace KVCache
             float free_block_slab_water_mark_low_min;
             // The maximum ratio of free blocks to total blocks
             float free_block_slab_water_mark_high_max;
-            // Whether to enable background flush
+            // Whether to enable background flush.
+            // enable_background_flush can be set by KVCACHE_ENABLE_BACKGROUND_FLUSH
+            // environment variable, 1 means true and 0 means false.
             bool enable_background_flush;
             // Whether to enable background gc
+            // enable_background_gc can be set by KVCACHE_ENABLE_BACKGROUND_GC
+            // environment variable, 1 means true and 0 means false.
             bool enable_background_gc;
             // The size of each slab class
             int slab_class_size[kMaxNumSlabClass];

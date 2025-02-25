@@ -108,6 +108,7 @@ namespace KVCache
             const int items = (slab_size_ - Slab::header_size()) / slab_class_table_[i].slot_size;
             const int slot_size = slab_class_table_[i].slot_size;
             const int kv_size = slot_size - Slot::header_size();
+            ::printf("slab class %2d: items %5d slot_size %7d  kv_size %7d\n", i, items, slot_size, kv_size);
         }
     }
 
@@ -123,6 +124,7 @@ namespace KVCache
             auto min_index_mem_budget = min_nr_index_entry * sizeof(IndexEntry);
             throw std::invalid_argument(std::format("index_mem_budget {} is too small, min_index_mem_budget {} bytes", options_.index_mem_budget, min_index_mem_budget));
         }
+        ::printf("nr_index_entry %zu\n", nr_index_entry);
         index_area_base_ = (IndexEntry *)mmap(nullptr, nr_index_entry * sizeof(IndexEntry), PROT_READ | PROT_WRITE,
                                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (index_area_base_ == MAP_FAILED)
@@ -166,6 +168,17 @@ namespace KVCache
     KVCache::KVCache(SSD *ssd, const Options &options)
         : ssd_(ssd), options_(options)
     {
+        const char *enable_background_flush =   std::getenv("KVCACHE_ENABLE_BACKGROUND_FLUSH");
+        if (enable_background_flush) {
+            int value = std::atoi(enable_background_flush);
+            options_.enable_background_flush = value != 0;
+        }
+        const char *enable_background_gc = std::getenv("KVCACHE_ENABLE_BACKGROUND_GC");
+        if (enable_background_gc) {
+            int value = std::atoi(enable_background_gc);
+            options_.enable_background_gc = value != 0;
+        }
+
         free_block_water_mark_low_min_ = std::max(1, static_cast<int>(options_.free_block_slab_water_mark_low_min * ssd_->nr_blocks_));
         free_block_water_mark_high_max_ = std::max(free_block_water_mark_low_min_ + 10, static_cast<int>(options_.free_block_slab_water_mark_high_max * ssd_->nr_blocks_));
         free_block_water_mark_low_ = std::max(free_block_water_mark_low_min_, static_cast<int>(options_.free_block_water_mark_low * ssd_->nr_blocks_));
