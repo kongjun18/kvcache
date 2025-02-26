@@ -2,12 +2,12 @@
 
 
 build-release:
-	@cmake -B build -S.
-	@cmake -DCMAKE_BUILD_TYPE=Release --build build
+	@cmake -DCMAKE_BUILD_TYPE=Release -B build -S.
+	@cd build && cmake --build .
 
 build-debug:
-	@cmake -B build -S.
-	@cmake -DCMAKE_BUILD_TYPE=Debug --build build
+	@cmake -DCMAKE_BUILD_TYPE=Debug -B build -S.
+	@cd build && cmake --build .
 
 build:build-release
 
