@@ -79,23 +79,3 @@ if(KVCACHE_BUILD_TESTS)
     )
     add_test(NAME kvcache_test COMMAND kvcache_test)
 endif()
-
-# if(KVCACHE_BUILD_EXAMPLES)
-#     add_subdirectory(examples)
-# endif()
-
-
-# Install library targets
-install(TARGETS ${PROJECT_NAME}
-    EXPORT ${PROJECT_NAME}Targets
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-
-# Install header files
-install(FILES include/kvcache.h include/kvcache_c_api.h
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-
