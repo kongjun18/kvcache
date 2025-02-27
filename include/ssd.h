@@ -6,7 +6,6 @@
 #include <string>
 #include "status.h"
 #include <string_view>
-#include "ssd.h"
 #include <iostream>
 namespace KVCache
 {

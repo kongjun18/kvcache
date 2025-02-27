@@ -6,8 +6,18 @@
 
 #include <stdexcept>
 #include <format>
+
 namespace KVCache
 {
+
+    void* alloc_aligned_buffer(size_t size, size_t align) {
+        void* ptr = NULL;
+
+        if (posix_memalign(&ptr, align, size) != 0) {
+            return NULL;
+        }
+        return ptr;
+    }
 
     SSD::Block::Block(SSD &ssd, int block_id) : ssd(ssd), block_id(block_id)
     {
@@ -16,13 +26,15 @@ namespace KVCache
 
     Status SSD::Block::read(std::string *value)
     {
-        if (ssd.is_dev_) {  
+        if (ssd.is_dev_) {
+            thread_local char *read_buffer = static_cast<char*>(alloc_aligned_buffer(ssd.block_size_, 4096));
+            assert(read_buffer);
             off_t offset = ssd.dstart_ + block_id * ssd.block_size_;
-            value->resize(ssd.block_size_);
-            ssize_t nread = pread(ssd.fd_, value->data(), ssd.block_size_, offset);
+            ssize_t nread = pread(ssd.fd_, read_buffer, ssd.block_size_, offset);
             if (nread != ssd.block_size_) {
                 return Status::Corruption("read failed");
             }
+            value->assign(read_buffer, ssd.block_size_);
         } else {
             std::string key = ssd.block_key(channel_id, block_id);
             rocksdb::Status status = ssd.db_->Get(rocksdb::ReadOptions(), key, value);
