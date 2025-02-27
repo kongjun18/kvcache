@@ -1,0 +1,370 @@
+diff --git a/src/Makefile.am b/src/Makefile.am
+index f041deb..699ac43 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -1,11 +1,12 @@
+ bin_PROGRAMS = fatcache stg_ins_test
+ 
+ AM_CPPFLAGS = -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64
+-CFLAGS = -g
++CFLAGS = -g -I../../../../include -L../../../../build/lib -l KVCache
+ AM_CFLAGS = -Wall
+ AM_CFLAGS += -Wmissing-prototypes -Wmissing-declarations -Wredundant-decls
+ AM_CFLAGS += -fno-strict-aliasing
+ AM_CFLAGS += -Wunused-function -Wunused-value -Wunused-variable
++AM_CFLAGS += -g -I../../../../include -L../../../../build/lib -l KVCache
+ 
+ LDFLAGS += -rdynamic
+ 
+diff --git a/src/fc.c b/src/fc.c
+index 584144f..bab2c45 100644
+--- a/src/fc.c
++++ b/src/fc.c
+@@ -54,7 +54,7 @@
+ #define FC_SERVER_ID        0
+ #define FC_SERVER_N         1
+ 
+-struct settings settings;          /* fatcache settings */
++extern struct settings settings;          /* fatcache settings */
+ static int show_help;              /* show fatcache help? */
+ static int show_version;           /* show fatcache version? */
+ static int show_sizes;             /* show fatcache struct sizes? */
+@@ -79,6 +79,8 @@ static struct option long_options[] = {
+     { "slab-profile",         required_argument,  NULL,   'z' }, /* profile of slab item sizes */
+     { "ssd-device",           required_argument,  NULL,   'D' }, /* path to ssd device file */
+     { "server-id",            required_argument,  NULL,   's' }, /* server instance id */
++    { "kvcache",              required_argument,  NULL,   'k'}, /* use KVCache */
++    { "rocksdb",              required_argument,  NULL,   'r'}, /* use RocksDB */
+     { NULL,                   0,                  NULL,    0  }
+ };
+ 
+@@ -100,6 +102,8 @@ static char short_options[] =
+     "z:" /* profile of slab item sizes */
+     "D:" /* path to ssd device file */
+     "s:" /* server instance id */
++    "k:" /* use KVCache or not */
++    "r:" /* use RocksDB or not */
+     ;
+ 
+ static void
+@@ -269,7 +273,7 @@ fc_set_default_options(void)
+     settings.max_index_memory = FC_INDEX_MEMORY;
+     settings.max_slab_memory = FC_SLAB_MEMORY;
+     settings.chunk_size = FC_CHUNK_SIZE;
+-    settings.slab_size = FC_SLAB_SIZE;
++    settings.slab_size = 4*1024;
+ 
+     memset(settings.profile, 0, sizeof(settings.profile));
+     settings.profile_last_id = SLABCLASS_MAX_ID;
+@@ -278,6 +282,9 @@ fc_set_default_options(void)
+ 
+     settings.server_id = FC_SERVER_ID;
+     settings.server_n = FC_SERVER_N;
++
++    settings.rocksdb = false;
++    settings.kvcache = false;
+ }
+ 
+ static rstatus_t
+@@ -470,6 +477,15 @@ fc_get_options(int argc, char **argv)
+ 
+             break;
+ 
++        case 'k':
++            settings.kvcache = true;
++            printf("using KVCache\n");
++            break;
++
++        case 'r':
++            settings.rocksdb = true;
++            break;
++
+         case '?':
+             switch (optopt) {
+             case 'o':
+diff --git a/src/fc_connection.c b/src/fc_connection.c
+index 756c6e2..f37062a 100644
+--- a/src/fc_connection.c
++++ b/src/fc_connection.c
+@@ -18,6 +18,7 @@
+ #include <fc_core.h>
+ #include <fc_server.h>
+ #include <fc_client.h>
++#include <sys/uio.h>
+ 
+ extern struct settings settings;
+ 
+diff --git a/src/fc_core.c b/src/fc_core.c
+index 3bd714e..af8912d 100644
+--- a/src/fc_core.c
++++ b/src/fc_core.c
+@@ -21,7 +21,10 @@
+ #include <fc_core.h>
+ #include <fc_server.h>
+ 
++#include "kvcache_c_api.h"
+ extern struct settings settings;
++kvcache_t *kvcache;
++extern char *kvcache_buffer;
+ 
+ rstatus_t
+ core_init(void)
+@@ -61,6 +64,49 @@ core_init(void)
+         return status;
+     }
+ 
++    ssd_t *ssd = NULL;
++    ssd_config_t *config = ssd_config_create();
++    // 1.2GiB SSD with 4KiB blocks
++    ssd_config_set_block_size(config, 4*1024);
++    ssd_config_set_nr_channels(config, 4);
++    ssd_config_set_blocks_per_channel(config,78643);
++    char *errptr = NULL;
++
++    const char *ssd_path = NULL;
++    if (settings.rocksdb ) {
++        ssd_path = "test.db";
++        printf("using RocksDB\n");
++    } else {
++        ssd_path = "/dev/loop0";
++        printf("using /dev/loop0\n");
++    }
++    ssd = ssd_create(ssd_path, config, &errptr);
++    if (!ssd) {
++        fprintf(stderr, "%s\n", errptr);
++        exit(1);
++    }
++
++    kvcache_options_t* kvcache_options = kvcache_options_create(ssd);
++    /* kvcache_options_set_enable_background_flush(kvcache_options, false); */
++    /* kvcache_options_set_enable_background_gc(kvcache_options, false); */
++    kvcache_options_set_index_mem_budget(kvcache_options, settings.max_index_memory);
++    kvcache_options_set_slab_mem_budget(kvcache_options, settings.max_slab_memory);
++    int slab_class_siz [255] = {0};
++    for (int i = 0; i < settings.profile_last_id+1; i++) {
++        slab_class_siz[i] = settings.profile[i];
++    }
++    kvcache_options_set_slab_class_size(kvcache_options, slab_class_siz, settings.profile_last_id+1);
++
++    kvcache = kvcache_create(ssd,kvcache_options,&errptr);
++    if (!kvcache) {
++        fprintf(stderr, "%s\n", errptr);
++        exit(1);
++    }
++    ssd_config_destroy(config);
++    kvcache_options_destroy(kvcache_options);
++
++    kvcache_buffer = (char*)malloc(sizeof(struct item) + 8*1024*1024);
++
+     return FC_OK;
+ }
+ 
+diff --git a/src/fc_request.c b/src/fc_request.c
+index ffd5ad4..71bbc54 100644
+--- a/src/fc_request.c
++++ b/src/fc_request.c
+@@ -22,8 +22,13 @@
+ #include <fc_core.h>
+ #include <fc_event.h>
+ #include <fc_stats.h>
++#include "kvcache_c_api.h"
+ 
+ extern struct string msg_strings[];
++extern struct kvcache_t *kvcache;
++char *kvcache_buffer = NULL;
++size_t kvcache_buffer_size = 8*1024*1024;
++extern struct settings settings;
+ 
+ struct msg *
+ req_get(struct conn *conn)
+@@ -175,7 +180,35 @@ req_process_get(struct context *ctx, struct conn *conn, struct msg *msg)
+     struct itemx *itx;
+     struct item *it;
+ 
+-    itx = itemx_getx(msg->hash, msg->md);
++    struct itemx itemx;
++    if (settings.kvcache) {
++        const char * key = (const char*)msg->key_start;
++        const int keylen = msg->key_end - msg->key_start;
++        size_t value_len;
++        char *errptr = NULL;
++        it = (struct item*)kvcache_buffer;
++        it->magic = ITEM_MAGIC;
++        char *p = (char *)item_key(it);
++        memcpy(p, key, keylen);
++        p = p+keylen;
++        kvcache_get(kvcache, key, keylen, p, kvcache_buffer_size, &value_len, &errptr);
++        if (!errptr) {
++            it->cid = 0;
++            it->nkey = keylen;
++            it->ndata = value_len;
++            it->flags = 0;
++
++            itx = &itemx;
++            itx->cas = 0;
++            itx->expiry = 0;
++        }
++        else {
++            itx = NULL;
++            it = NULL;
++        }
++    } else {
++        itx = itemx_getx(msg->hash, msg->md);
++    }
+     if (itx == NULL) {
+         msg_type_t type;
+ 
+@@ -197,14 +230,16 @@ req_process_get(struct context *ctx, struct conn *conn, struct msg *msg)
+         rsp_send_status(ctx, conn, msg, MSG_RSP_NOT_FOUND);
+         return;
+     }
+-    /*
+-     * On a hit, we read the item with address [sid, offset] and respond
+-     * with item value if the item hasn't expired yet.
+-     */
+-    it = slab_read_item(itx->sid, itx->offset);
+-    if (it == NULL) {
+-        rsp_send_error(ctx, conn, msg, MSG_RSP_SERVER_ERROR, errno);
+-        return;
++    if (!settings.kvcache) {
++        /*
++         * On a hit, we read the item with address [sid, offset] and respond
++         * with item value if the item hasn't expired yet.
++         */
++        it = slab_read_item(itx->sid, itx->offset);
++        if (it == NULL) {
++            rsp_send_error(ctx, conn, msg, MSG_RSP_SERVER_ERROR, errno);
++            return;
++        }
+     }
+ 
+     STATS_HIT_INCR(msg->type);
+@@ -218,13 +253,18 @@ req_process_delete(struct context *ctx, struct conn *conn, struct msg *msg)
+     uint8_t cid;
+     struct itemx *itx;
+ 
+-    itx = itemx_getx(msg->hash, msg->md);
+-    if (itx == NULL) {
+-        rsp_send_status(ctx, conn, msg, MSG_RSP_NOT_FOUND);
+-        return;
++    if (settings.kvcache) {
++        kvcache_delete(kvcache, (const char*)msg->key_start, msg->key_end - msg->key_start);
++        cid = 0;
++    } else {
++        itx = itemx_getx(msg->hash, msg->md);
++        if (itx == NULL) {
++            rsp_send_status(ctx, conn, msg, MSG_RSP_NOT_FOUND);
++            return;
++        }
++        cid = slab_get_cid(itx->sid);
++        itemx_removex(msg->hash, msg->md);
+     }
+-    cid = slab_get_cid(itx->sid);
+-    itemx_removex(msg->hash, msg->md);
+ 
+     STATS_HIT_INCR(msg->type);
+     SC_STATS_INCR(cid, msg->type);
+@@ -240,25 +280,41 @@ req_process_set(struct context *ctx, struct conn *conn, struct msg *msg)
+     key = msg->key_start;
+     nkey = (uint8_t)(msg->key_end - msg->key_start);
+ 
+-    cid = item_slabcid(nkey, msg->vlen);
+-    if (cid == SLABCLASS_INVALID_ID) {
+-        rsp_send_error(ctx, conn, msg, MSG_RSP_CLIENT_ERROR, EINVAL);
++    if (settings.kvcache) {
++        char *errptr = NULL;
++        kvcache_put(kvcache, (const char*)key, nkey, (const char*)msg->value, msg->vlen, &errptr);
++        if (errptr) {
++            if (memcmp(errptr, "Object is too large", strlen("Object is too large")) == 0 )  {
++                rsp_send_error(ctx, conn, msg, MSG_RSP_CLIENT_ERROR, EINVAL);
++                return;
++            } else {
++                rsp_send_error(ctx, conn, msg, MSG_RSP_SERVER_ERROR, ENOMEM);
++                return;
++            }
++        }
++        rsp_send_status(ctx, conn, msg, MSG_RSP_STORED);
+         return;
+-    }
++    } else {
++        cid = item_slabcid(nkey, msg->vlen);
++        if (cid == SLABCLASS_INVALID_ID) {
++            rsp_send_error(ctx, conn, msg, MSG_RSP_CLIENT_ERROR, EINVAL);
++            return;
++        }
+ 
+-    itemx_removex(msg->hash, msg->md);
++        itemx_removex(msg->hash, msg->md);
+ 
+-    it = item_get(key, nkey, cid, msg->vlen, time_reltime(msg->expiry),
+-                  msg->flags, msg->md, msg->hash);
+-    if (it == NULL) {
+-        rsp_send_error(ctx, conn, msg, MSG_RSP_SERVER_ERROR, ENOMEM);
+-        return;
+-    }
++        it = item_get(key, nkey, cid, msg->vlen, time_reltime(msg->expiry),
++                      msg->flags, msg->md, msg->hash);
++        if (it == NULL) {
++            rsp_send_error(ctx, conn, msg, MSG_RSP_SERVER_ERROR, ENOMEM);
++            return;
++        }
+ 
+-    mbuf_copy_to(&msg->mhdr, msg->value, item_data(it), msg->vlen);
++        mbuf_copy_to(&msg->mhdr, msg->value, item_data(it), msg->vlen);
+ 
+-    SC_STATS_INCR(cid, msg->type);
+-    rsp_send_status(ctx, conn, msg, MSG_RSP_STORED);
++        SC_STATS_INCR(cid, msg->type);
++        rsp_send_status(ctx, conn, msg, MSG_RSP_STORED);
++    }
+ }
+ 
+ static void
+@@ -538,8 +594,10 @@ req_process(struct context *ctx, struct conn *conn, struct msg *msg)
+      * CPU by storing the result in msg struct and doing this computation
+      * only once over the lifetime of this request.
+      */
+-    sha1(key, keylen, msg->md);
+-    msg->hash = sha1_hash(msg->md);
++    if (!(settings.kvcache && (msg->type == MSG_REQ_DELETE || msg->type == MSG_REQ_GET || msg->type == MSG_REQ_GETS || msg->type == MSG_REQ_SET ))) {
++        sha1(key, keylen, msg->md);
++        msg->hash = sha1_hash(msg->md);
++    }
+ 
+     STATS_INCR(msg->type);
+     switch (msg->type) {
+diff --git a/src/fc_settings.h b/src/fc_settings.h
+index 89b7505..2f63db5 100644
+--- a/src/fc_settings.h
++++ b/src/fc_settings.h
+@@ -25,5 +25,8 @@ struct settings {
+ 
+     uint32_t server_id;                    /* server id */
+     uint32_t server_n;                     /* # server */
++
++    bool     kvcache;                      /* KVCache? */
++    bool     rocksdb;                      /* RocksDB? */
+ };
+ #endif //_FC_SETTINGS_H_
+diff --git a/src/fc_slab.c b/src/fc_slab.c
+index cd523e1..be20216 100644
+--- a/src/fc_slab.c
++++ b/src/fc_slab.c
+@@ -16,6 +16,8 @@
+  */
+ 
+ #include <fc_core.h>
++#include "kvcache_c_api.h"
++#include <stdio.h>
+ 
+ extern struct settings settings;
+ 
+@@ -51,6 +53,8 @@ static uint64_t nevict;
+ static uint8_t *evictbuf;              /* evict buffer */
+ static uint8_t *readbuf;               /* read buffer */
+ 
++extern kvcache_t *kvcache;
++
+ /*
+  * Return the maximum space available for item sized chunks in a given
+  * slab. Slab cannot contain more than 2^32 bytes (4G).

@@ -1,0 +1,6 @@
+[submodule "tests/benchmark/twemperf"]
+	path = tests/benchmark/twemperf
+	url = https://github.com/twitter-archive/twemperf
+[submodule "tests/benchmark/fatcache"]
+	path = tests/benchmark/fatcache
+	url = https://github.com/twitter/fatcache

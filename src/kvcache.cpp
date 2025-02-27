@@ -108,7 +108,7 @@ namespace KVCache
             const int items = (slab_size_ - Slab::header_size()) / slab_class_table_[i].slot_size;
             const int slot_size = slab_class_table_[i].slot_size;
             const int kv_size = slot_size - Slot::header_size();
-            ::printf("slab class %2d: items %5d slot_size %7d  kv_size %7d\n", i, items, slot_size, kv_size);
+            // ::printf("slab class %2d: items %5d slot_size %7d  kv_size %7d\n", i, items, slot_size, kv_size);
         }
     }
 
@@ -124,7 +124,7 @@ namespace KVCache
             auto min_index_mem_budget = min_nr_index_entry * sizeof(IndexEntry);
             throw std::invalid_argument(std::format("index_mem_budget {} is too small, min_index_mem_budget {} bytes", options_.index_mem_budget, min_index_mem_budget));
         }
-        ::printf("nr_index_entry %zu\n", nr_index_entry);
+        // ::printf("nr_index_entry %zu\n", nr_index_entry);
         index_area_base_ = (IndexEntry *)mmap(nullptr, nr_index_entry * sizeof(IndexEntry), PROT_READ | PROT_WRITE,
                                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (index_area_base_ == MAP_FAILED)
@@ -721,6 +721,7 @@ namespace KVCache
     // Drop full dslab directly to release disk space and index entries.
     bool KVCache::do_quick_gc(int nr_back_to_free_dslab, int nr_back_to_ops_pool)
     {
+        ::printf("quick_gc: %d dslabs to free\n", nr_back_to_ops_pool + nr_back_to_free_dslab);
         assert(ops_pool_size_ > 0 && ops_pool_size_ <= max_ops_pool_size_);
         assert(check_ops_pool());
 
@@ -867,6 +868,7 @@ namespace KVCache
         auto status = ssd_->read_block(dslab->block_id, read_buffer);
         if (!status.ok())
         {
+            std::cout << dslab->block_id << std::endl;
             throw std::runtime_error("Failed to read block");
         }
         auto slab = reinterpret_cast<Slab *>(read_buffer->data());
@@ -983,6 +985,7 @@ namespace KVCache
         {
             nr_reclaimed += list.size_;
         }
+        printf("Normal GC: reclaimed %d dslabs\n", nr_reclaimed);
         // Tune ops_pool_size_ to new_ops_size
         assert(nr_reclaimed == 0 || nr_reclaimed >= ops_dslab_consumed);
         for (int channel = 0, i = 0; i < ops_dslab_consumed;)

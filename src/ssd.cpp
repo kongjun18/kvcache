@@ -103,7 +103,7 @@ namespace KVCache
             throw std::runtime_error("get nr_blocks failed");
         }
         nr_blocks_ = std::stoi(value);
-
+        std::cout << nr_blocks_ << std::endl;
         status = db_->Get(read_options, kBlockSizeKey, &value);
         if (!status.ok())
         {
