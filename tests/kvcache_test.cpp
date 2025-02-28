@@ -165,6 +165,9 @@ TEST_F(KVCacheTest, TestNormalGC) {
     KVCache::Status status;
     const int max_key_id = 100;
     for (uint64_t i = 0, size = 0; size < total_size; i=(i+1)%max_key_id) {
+        if (i == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        }
         int value_size = fixed_random_size();
         std::string key = std::format("test_key_{}", i);
         key_2_size[key] = value_size;
