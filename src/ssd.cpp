@@ -52,7 +52,8 @@ namespace KVCache
             off_t offset = ssd.dstart_ + block_id * ssd.block_size_;
             ssize_t nwrite = pwrite(ssd.fd_, value.data(), value.size(), offset);
             if (nwrite != value.size()) {
-                return Status::Corruption("write failed");
+                printf("block_id: %d block_size: %d, buffer: %p offset: %ld, value_size: %d, errno: %d\n:, error %s\n",block_id, ssd.block_size_, value.data(), offset, value.size(),errno, strerror(errno));
+                return Status::Corruption(std::format("write failed: %s", strerror(errno)));
             }
         } else {
             std::string key = ssd.block_key(channel_id, block_id);
