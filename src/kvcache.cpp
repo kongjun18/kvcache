@@ -187,6 +187,8 @@ namespace KVCache
         slab_init();
         slab_class_init();
         index_init();
+        if (options_.enable_background_gc) {
+            slab_gc();
     }
 
     Status KVCache::get_slice(std::string_view key, std::string *read_buffer, std::string_view *value)
@@ -281,7 +283,8 @@ namespace KVCache
                     // This line needs to be protected by reader_mutex_, otherwise
                     // Del may decrement the nr_used of the old slab while Put is
                     // inserting the new slab, causing repeated decrement.
-                    assert(old_slabinfo->nr_used.fetch_sub(1) > 0);
+                    auto old_nr_used = old_slabinfo->nr_used.fetch_sub(1);
+                    assert(old_nr_used > 0);
                     index_entry->slab_id = slab->sid;
                     index_entry->slot_id = slot_id(slot);
                 }
@@ -694,6 +697,7 @@ namespace KVCache
         }
 
         gc_finished_signal_.notify_all();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
         return run_next_round;
     }
 
@@ -914,7 +918,7 @@ namespace KVCache
         auto old_ops_size = ops_pool_size_;
         for (int i = 0; i < nr_slab_class_; i++)
         {
-            auto nr_evicted_slots = 0;
+            auto nr_slots_moved = 0;
             auto to_drop = std::vector<Slab *>();
 
             while (!slab_class_to_drop[i].empty())
@@ -923,9 +927,9 @@ namespace KVCache
                 auto nr_used = dslab->nr_used.load();
                 assert(nr_used >= 0);
                 auto nr_total_slots = dslab->nr_slots;
-                auto nr_slots_will_be_evicted = (nr_used + nr_evicted_slots);
+                auto nr_slots_move = (nr_used + nr_slots_moved);
                 // Accumulate enough valid objects to move to evict_buffer
-                if (nr_slots_will_be_evicted > nr_total_slots)
+                if (nr_slots_move > nr_total_slots)
                 {
                     if (to_drop.size() > 1)
                     {
@@ -935,7 +939,7 @@ namespace KVCache
                         }
                         gc_dslabs(to_drop, &read_buffer, free_list);
                         to_drop.clear();
-                        nr_evicted_slots = 0;
+                        nr_slots_moved = 0;
                     }
                     // to_drop.size() == 1 means that drop a full dslab need to
                     // consume a ops_pool dslab, which is meaningless. We have
@@ -944,7 +948,7 @@ namespace KVCache
                 }
                 slab_class_to_drop[i].pop_back();
                 to_drop.push_back(dslab);
-                nr_evicted_slots += nr_used;
+                nr_slots_moved += nr_used;
             }
             if (to_drop.size() > 1)
             {
